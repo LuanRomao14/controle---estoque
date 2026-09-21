@@ -102,19 +102,29 @@ const h = (type, props, ...children) => {
 };
 const html = htm.bind(h);
 
+/* ---------- Formatação e utilidades ---------- */
 const BRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const COMPACT = new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 });
 const money = n => BRL.format((n || 0) / 100);
-const moneyReais = n => BRL.format(n || 0);
+const compactMoney = c => COMPACT.format((c || 0) / 100); // recebe centavos
 const toCents = n => Math.round((Number(n) || 0) * 100);
 const fromCents = c => (Number(c) || 0) / 100;
-const round2 = n => Math.round((n || 0) * 100) / 100;
+const round3 = n => Math.round((Number(n) || 0) * 1000) / 1000;
+const fmtQty = n => String(round3(n)).replace('.', ',');
+const lineCent = i => Math.round((i.qtd || 0) * (i.precoCent || 0));
+const isKg = u => u === 'kg';
+const validQty = (n, unidade, allowZero) => Number.isFinite(n) && (allowZero ? n >= 0 : n > 0) && (isKg(unidade) || Number.isInteger(n));
+const qtyMsg = unidade => isKg(unidade) ? 'Use um número maior ou igual a zero (pode ter vírgula).' : 'Use um número inteiro, zero ou maior.';
 const uid = () => Math.random().toString(36).slice(2, 9);
 const pad = (n, l = 4) => String(n).padStart(l, '0');
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const getCurrentMonthKey = () => {
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+};
+const todayStr = () => {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 };
 const monthKey = iso => { const d = new Date(iso); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); };
 const monthLabel = key => { const [y, m] = key.split('-').map(Number); return cap(new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })); };
@@ -123,10 +133,17 @@ const fmtDate = iso => new Date(iso).toLocaleDateString('pt-BR');
 const fmtTime = iso => new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 const fmtDateTime = iso => fmtDate(iso) + ' às ' + fmtTime(iso);
 const onlyDigits = s => String(s || '').replace(/\D/g, '');
+const daysSince = iso => Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
+// Vencimento vale até o fim do dia
+const isOverdue = r => { const v = new Date(r.vencimento); v.setHours(23, 59, 59, 999); return v.getTime() < Date.now(); };
+
+// Aceita "1.234,56", "1234,56", "1234.56" e "1.000" (ponto de milhar em pt-BR)
 const parseNum = s => {
   const t = String(s).trim();
   if (!t) return NaN;
-  return t.includes(',') ? parseFloat(t.replace(/\./g, '').replace(',', '.')) : parseFloat(t);
+  if (t.includes(',')) return parseFloat(t.replace(/\./g, '').replace(',', '.'));
+  if (/^\d{1,3}(\.\d{3})+$/.test(t)) return parseFloat(t.replace(/\./g, ''));
+  return parseFloat(t);
 };
 const maskDoc = v => {
   const d = onlyDigits(v).slice(0, 14);
@@ -166,7 +183,40 @@ async function copyText(text) {
     } catch (e2) { return false; }
   }
 }
+function downloadFile(name, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const csvCell = v => { const s = String(v == null ? '' : v); return /[;"\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+const csvMoney = c => (Math.round(c || 0) / 100).toFixed(2).replace('.', ',');
 const enterSubmit = fn => e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); fn(); } };
+
+// Reduz a logo para não estourar o limite do localStorage (~5 MB)
+function resizeImage(file, max, cb) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
+      const w = Math.max(1, Math.round(img.width * scale));
+      const ht = Math.max(1, Math.round(img.height * scale));
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = ht;
+      const ctx = cv.getContext('2d');
+      const isPng = file.type === 'image/png';
+      if (!isPng) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, ht); }
+      ctx.drawImage(img, 0, 0, w, ht);
+      cb(isPng ? cv.toDataURL('image/png') : cv.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = () => cb(null);
+    img.src = ev.target.result;
+  };
+  reader.onerror = () => cb(null);
+  reader.readAsDataURL(file);
+}
 
 function mulberry32(a) {
   return function () {
@@ -177,6 +227,24 @@ function mulberry32(a) {
   };
 }
 
+/* ---------- Dados ---------- */
+function seedCompany() {
+  return {
+    razao: 'Carvão Romão - Essência Plantada',
+    cnpj: '00.000.000/0001-00',
+    telefone: '(35) 99999-0000',
+    endereco: 'São Lourenço - MG',
+    logoUrl: '',
+    rodape: 'Carvão 100% Eucalipto - Obrigado pela preferência!'
+  };
+}
+
+// Primeiro acesso: sistema vazio, pronto para uso real
+function emptyData() {
+  return { products: [], clients: [], sales: [], expenses: [], receivables: [], movements: [], company: seedCompany(), seq: 1, lastBackupAt: null, autoBackup: true };
+}
+
+// Dados fictícios, só para testar (botão "Restaurar dados de exemplo")
 function seedData() {
   const rnd = mulberry32(20260921);
   const now = Date.now();
@@ -190,14 +258,6 @@ function seedData() {
     { id: 'c1', nome: 'Restaurante Sabor da Serra Ltda', doc: '12.345.678/0001-90', ie: '123.456.789.00', email: 'contato@saborserra.com.br', tel: '(31) 99999-0001', endereco: 'Av. das Palmeiras, 450', cep: '37470-000', cidade: 'São Lourenço - MG' },
     { id: 'c2', nome: 'Churrascaria Boi na Brasa', doc: '98.765.432/0001-10', ie: '', email: '', tel: '(31) 98888-0002', endereco: 'Rua do Comércio, 88', cep: '', cidade: 'São Lourenço - MG' }
   ];
-  const company = {
-    razao: 'Carvão Romão - Essência Plantada',
-    cnpj: '00.000.000/0001-00',
-    telefone: '(35) 99999-0000',
-    endereco: 'São Lourenço - MG',
-    logoUrl: '',
-    rodape: 'Carvão 100% Eucalipto - Obrigado pela preferência!'
-  };
   const day = new Date(now).getDate();
   const plan = [];
   for (let i = 0; i < 5; i++) plan.push(Math.floor(rnd() * day));
@@ -205,7 +265,7 @@ function seedData() {
   const qtys = [5, 10, 15, 20];
   const pays = ['Pix', 'Dinheiro', 'Cartão'];
   const sales = plan.map((daysAgo, idx) => {
-    let d = new Date(now - daysAgo * 864e5);
+    const d = new Date(now - daysAgo * 864e5);
     const c = clients[Math.floor(rnd() * clients.length)];
     const p = products[Math.floor(rnd() * products.length)];
     const itens = [{ produtoId: p.id, nome: p.nome, qtd: qtys[Math.floor(rnd() * qtys.length)], precoCent: p.precoCent, custoCent: p.custoCent }];
@@ -214,13 +274,14 @@ function seedData() {
   }).reverse();
 
   const expenses = [
-    { id: 'e1', descricao: 'Sacos de Papel e Embalagens', categoria: 'Embalagem', valorCent: 35000, data: new Date(now - 2 * 864e5).toISOString() }
+    { id: 'e1', descricao: 'Sacos de Papel e Embalagens', categoria: 'Embalagens', valorCent: 35000, data: new Date(now - 2 * 864e5).toISOString() }
   ];
 
-  return { products, clients, sales, expenses, receivables: [], movements: [], company, seq: plan.length + 1, lastBackupAt: null, autoBackup: true };
+  return { products, clients, sales, expenses, receivables: [], movements: [], company: seedCompany(), seq: plan.length + 1, lastBackupAt: null, autoBackup: true };
 }
 
 const KEY = 'carvao-estoque-vendas-v3';
+
 function migrateDb(d) {
   const products = (d.products || []).map(p => ({
     unidade: 'saco', custoCent: p.custoCent ?? toCents(p.custo ?? 0), precoCent: p.precoCent ?? toCents(p.preco ?? 0),
@@ -228,42 +289,64 @@ function migrateDb(d) {
   }));
   const sales = (d.sales || []).map(s => {
     const itens = (s.itens || []).map(i => ({ ...i, precoCent: i.precoCent ?? toCents(i.preco ?? 0), custoCent: i.custoCent ?? 0 }));
-    const subtotalCent = s.subtotalCent ?? Math.round(itens.reduce((a,i)=>a+i.qtd*i.precoCent,0));
+    const subtotalCent = s.subtotalCent ?? Math.round(itens.reduce((a, i) => a + i.qtd * i.precoCent, 0));
     const descontoCent = s.descontoCent ?? toCents(s.desconto ?? 0);
-    return { ...s, itens, subtotalCent, descontoCent, totalCent: s.totalCent ?? Math.max(0, subtotalCent-descontoCent) };
+    return { ...s, itens, subtotalCent, descontoCent, totalCent: s.totalCent ?? Math.max(0, subtotalCent - descontoCent) };
   });
   const expenses = (d.expenses || []).map(e => ({ ...e, valorCent: e.valorCent ?? toCents(e.valor ?? 0) }));
-  return { expenses: [], receivables: [], movements: [], lastBackupAt: null, autoBackup: true, ...d, products, sales, expenses };
+  const out = { expenses: [], receivables: [], movements: [], clients: [], lastBackupAt: null, autoBackup: true, ...d, products, sales, expenses };
+  out.company = { ...seedCompany(), ...(d.company || {}) };
+  // Nunca repete número de venda, mesmo com backup antigo sem "seq"
+  const maxNum = sales.reduce((a, s) => Math.max(a, Number(s.numero) || 0), 0);
+  out.seq = Math.max(Number(d.seq) || 0, maxNum + 1);
+  return out;
 }
 function loadDb() {
+  let raw = null;
   try {
-    const raw = localStorage.getItem(KEY);
+    raw = localStorage.getItem(KEY);
     if (raw) { const d = JSON.parse(raw); if (d && d.products && d.clients && d.sales && d.company) return migrateDb(d); }
-  } catch (e) {}
-  return seedData();
+  } catch (e) {
+    // dados ilegíveis: guarda uma cópia antes de o app gravar por cima
+    try { if (raw) localStorage.setItem(KEY + '-corrompido', raw); } catch (e2) {}
+  }
+  return emptyData();
 }
+function getAutoBackupInfo() {
+  try { return JSON.parse(localStorage.getItem(KEY + '-auto-backup') || 'null'); } catch (e) { return null; }
+}
+// Cópia de segurança neste navegador (sem a logo, para economizar espaço)
+function snapshotNow(db) {
+  try {
+    const slim = { ...db, company: { ...db.company, logoUrl: '' } };
+    localStorage.setItem(KEY + '-auto-backup', JSON.stringify({ savedAt: new Date().toISOString(), db: slim }));
+    return true;
+  } catch (e) { return false; }
+}
+// Retorna false quando não foi possível salvar
 function saveDb(db) {
   try {
     localStorage.setItem(KEY, JSON.stringify(db));
-    if (db.autoBackup !== false) {
-      localStorage.setItem(KEY + '-auto-backup', JSON.stringify({ savedAt: new Date().toISOString(), db }));
-    }
-  } catch (e) {}
-}
-function getAutoBackupInfo() {
-  try { return JSON.parse(localStorage.getItem(KEY + '-auto-backup') || 'null'); } catch(e) { return null; }
+  } catch (e) { return false; }
+  if (db.autoBackup !== false) {
+    const last = getAutoBackupInfo();
+    if (!last || Date.now() - new Date(last.savedAt).getTime() > 12 * 36e5) snapshotNow(db);
+  }
+  return true;
 }
 
+/* ---------- Ícones ---------- */
 const ICONS = {
   flame: '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
   dashboard: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
   cart: '<circle cx="8" cy="21" r="1"/><circle cx="19" cy="21" r="1"/><path d="M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12"/>',
   package: '<path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
-  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 1 0 7.75"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
   building: '<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>',
   calculator: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+  sliders: '<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>',
   trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
   printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect x="6" y="14" width="12" height="8" rx="1"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
@@ -279,6 +362,7 @@ function Icon({ name, size = 18, className = '' }) {
   return html`<svg xmlns="http://www.w3.org/2000/svg" width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" class=${className} aria-hidden="true" dangerouslySetInnerHTML=${{ __html: ICONS[name] }}></svg>`;
 }
 
+/* ---------- Componentes base ---------- */
 const INPUT = 'w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-ember';
 const BTN = 'inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ember focus-visible:ring-offset-2 focus-visible:ring-offset-canvas disabled:cursor-not-allowed disabled:opacity-50';
 const BTN_PRIMARY = BTN + ' bg-ember text-white hover:brightness-110';
@@ -341,10 +425,11 @@ function ConfirmModal({ cfg, onClose }) {
   <//>`;
 }
 
+/* ---------- Comprovante ---------- */
 function receiptText(sale, company) {
   const l = [];
   l.push(company.razao, 'CNPJ: ' + company.cnpj, 'Tel.: ' + company.telefone, company.endereco, '');
-  l.push('COMPROVANTE DE VENDA Nº ' + pad(sale.numero), fmtDateTime(sale.data), '');
+  l.push('COMPROVANTE DE VENDA Nº ' + pad(sale.numero) + (sale.status === 'Cancelada' ? ' (CANCELADA)' : ''), fmtDateTime(sale.data), '');
   l.push('Cliente: ' + sale.cliente.nome);
   if (sale.cliente.doc) l.push('CPF/CNPJ: ' + sale.cliente.doc);
   if (sale.cliente.ie) l.push('Inscrição Estadual (IE): ' + sale.cliente.ie);
@@ -357,8 +442,9 @@ function receiptText(sale, company) {
   }
   if (sale.cliente.cidade) l.push('Cidade: ' + sale.cliente.cidade);
   l.push('');
-  sale.itens.forEach(i => l.push(i.qtd + ' x ' + i.nome + ' (' + money(i.precoCent) + ') = ' + money(i.qtd * i.precoCent)));
-  l.push('', 'TOTAL: ' + money(sale.totalCent), 'Pagamento: ' + sale.pagamento, '', company.rodape || '');
+  sale.itens.forEach(i => l.push(fmtQty(i.qtd) + ' x ' + i.nome + ' (' + money(i.precoCent) + ') = ' + money(lineCent(i))));
+  if (sale.descontoCent) l.push('Desconto: ' + money(sale.descontoCent));
+  l.push('', 'TOTAL: ' + money(sale.totalCent), 'Pagamento: ' + sale.pagamento + (sale.vencimento ? ' - vencimento em ' + fmtDate(sale.vencimento) : ''), '', company.rodape || '');
   return l.join('\n');
 }
 
@@ -370,7 +456,7 @@ function Receipt({ sale, company, onClose, notify }) {
   }, []);
   const doPrint = () => { try { window.print(); } catch (e) { notify('Não foi possível abrir a impressão. Use Ctrl+P.', 'bad'); } };
   const doCopy = async () => { const ok = await copyText(receiptText(sale, company)); notify(ok ? 'Comprovante copiado.' : 'Não foi possível copiar o comprovante.', ok ? 'ok' : 'bad'); };
-  
+
   return html`<div class="receipt-overlay fixed inset-0 z-50 overflow-y-auto bg-black/60 p-3 sm:p-8" onMouseDown=${e => { if (e.target === e.currentTarget) onClose(); }}>
     <div class="mx-auto max-w-2xl">
       <div class="no-print mb-3 flex flex-wrap justify-end gap-2">
@@ -379,7 +465,7 @@ function Receipt({ sale, company, onClose, notify }) {
         <button class=${BTN_GHOST} onClick=${onClose}><${Icon} name="x" size=${16} />Fechar</button>
       </div>
       <article id="receipt-print" class="pop rounded-xl bg-white p-6 text-gray-900 shadow-2xl sm:p-9" style=${{ background: '#fff', color: '#111827' }}>
-        
+
         <header class="flex flex-row items-start justify-between gap-4 border-b-2 border-gray-900 pb-4">
           <div class="flex items-start gap-4">
             ${company.logoUrl ? html`<img src=${company.logoUrl} alt="Logo" class="h-16 w-16 object-contain rounded-lg border border-gray-200 mt-0.5" />` : null}
@@ -396,6 +482,8 @@ function Receipt({ sale, company, onClose, notify }) {
             <p class="tnum text-xs text-gray-600">${fmtDate(sale.data)} às ${fmtTime(sale.data)}</p>
           </div>
         </header>
+
+        ${sale.status === 'Cancelada' ? html`<p class="mt-4 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">VENDA CANCELADA${sale.canceladaEm ? ' em ' + fmtDate(sale.canceladaEm) : ''}</p>` : null}
 
         <section class="mt-5">
           <p class="text-xs font-semibold text-gray-500 uppercase">Cliente</p>
@@ -426,16 +514,16 @@ function Receipt({ sale, company, onClose, notify }) {
             <tbody>
               ${sale.itens.map(i => html`<tr key=${i.produtoId} class="border-b border-gray-200">
                 <td class="px-3 py-2">${i.nome}</td>
-                <td class="tnum px-3 py-2 text-right">${i.qtd}</td>
+                <td class="tnum px-3 py-2 text-right">${fmtQty(i.qtd)}</td>
                 <td class="tnum px-3 py-2 text-right">${money(i.precoCent)}</td>
-                <td class="tnum px-3 py-2 text-right font-medium">${money(i.qtd * i.precoCent)}</td>
+                <td class="tnum px-3 py-2 text-right font-medium">${money(lineCent(i))}</td>
               </tr>`)}
             </tbody>
           </table>
         </div>
 
         <div class="mt-4 flex flex-wrap items-end justify-between gap-3">
-          <p class="text-sm text-gray-600">Forma de pagamento: <span class="font-semibold text-gray-900">${sale.pagamento}</span>${sale.descontoCent ? html`<span class="ml-3">Desconto: ${money(sale.descontoCent)}</span>` : null}</p>
+          <p class="text-sm text-gray-600">Forma de pagamento: <span class="font-semibold text-gray-900">${sale.pagamento}</span>${sale.vencimento ? html`<span class="ml-3">Vencimento: <span class="font-semibold text-gray-900">${fmtDate(sale.vencimento)}</span></span>` : null}${sale.descontoCent ? html`<span class="ml-3">Desconto: ${money(sale.descontoCent)}</span>` : null}</p>
           <div class="text-right">
             <p class="text-sm text-gray-600">Valor total</p>
             <p class="tnum font-display text-3xl font-bold">${money(sale.totalCent)}</p>
@@ -451,14 +539,15 @@ function Receipt({ sale, company, onClose, notify }) {
   </div>`;
 }
 
+/* ---------- Painel ---------- */
 function MonthBars({ sales, selected, onSelect }) {
   const keys = lastMonths(6);
-  const totals = keys.map(k => sales.filter(s => monthKey(s.data) === k).reduce((a, s) => a + s.totalCent, 0));
+  const totals = keys.map(k => sales.filter(s => s.status !== 'Cancelada' && monthKey(s.data) === k).reduce((a, s) => a + s.totalCent, 0));
   const max = Math.max(...totals, 1);
   return html`<div class="flex items-stretch gap-2 sm:gap-4" role="group" aria-label="Vendas dos últimos 6 meses">
     ${keys.map((k, i) => html`<button key=${k} onClick=${() => onSelect(k)} title=${monthLabel(k) + ': ' + money(totals[i])} aria-pressed=${k === selected}
       class="flex h-52 min-w-0 flex-1 flex-col items-stretch gap-1.5 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ember">
-      <span class=${'tnum text-center text-xs ' + (k === selected ? 'font-semibold text-ink' : 'text-muted')}>${totals[i] ? COMPACT.format(totals[i]) : '-'}</span>
+      <span class=${'tnum text-center text-xs ' + (k === selected ? 'font-semibold text-ink' : 'text-muted')}>${totals[i] ? compactMoney(totals[i]) : '-'}</span>
       <span class="flex min-h-0 flex-1 items-end">
         <span class="w-full rounded-t-md transition-all" style=${{ height: Math.max(3, totals[i] / max * 100) + '%', background: k === selected ? 'var(--ember)' : 'var(--bar)' }}></span>
       </span>
@@ -475,65 +564,174 @@ function Dashboard({ db, gotoTab, openReceipt, askCancel }) {
     set.add(nowKey);
     return Array.from(set).sort().reverse();
   }, [db.sales, nowKey]);
-  const sales = useMemo(() => db.sales.filter(s => monthKey(s.data) === mes && s.status !== 'Cancelada').sort((a,b)=>b.data.localeCompare(a.data)), [db.sales, mes]);
-  const total = sales.reduce((a,s)=>a+(s.totalCent||0),0);
-  const ticket = sales.length ? Math.round(total/sales.length) : 0;
-  const unidades = sales.reduce((a,s)=>a+(s.itens||[]).reduce((b,i)=>b+(i.qtd||0),0),0);
-  const top = useMemo(() => { const by={}; sales.forEach(s=>(s.itens||[]).forEach(i=>by[i.nome]=(by[i.nome]||0)+(i.qtd||0))); return Object.entries(by).sort((a,b)=>b[1]-a[1]).slice(0,4); }, [sales]);
+  const history = useMemo(() => db.sales.filter(s => monthKey(s.data) === mes).sort((a, b) => b.data.localeCompare(a.data)), [db.sales, mes]);
+  const sales = useMemo(() => history.filter(s => s.status !== 'Cancelada'), [history]);
+  const total = sales.reduce((a, s) => a + (s.totalCent || 0), 0);
+  const ticket = sales.length ? Math.round(total / sales.length) : 0;
+  const unidades = round3(sales.reduce((a, s) => a + (s.itens || []).reduce((b, i) => b + (i.qtd || 0), 0), 0));
+  const top = useMemo(() => { const by = {}; sales.forEach(s => (s.itens || []).forEach(i => by[i.nome] = (by[i.nome] || 0) + (i.qtd || 0))); return Object.entries(by).sort((a, b) => b[1] - a[1]).slice(0, 4); }, [sales]);
   const topMax = top.length ? top[0][1] : 1;
-  const low = db.products.filter(p => Number(p.estoque||0) <= Number(p.minimo||0));
+  const low = db.products.filter(p => Number(p.estoque || 0) <= Number(p.minimo || 0));
   const isCurrent = mes === nowKey;
+  const backupDays = db.lastBackupAt ? daysSince(db.lastBackupAt) : null;
+  const needsBackup = (db.sales.length > 0 || db.products.length > 0) && (backupDays === null || backupDays >= 7);
+
   return html`<div>
-    <${PageHead} title="Painel de vendas" sub=${'Resumo de '+monthLabel(mes)+(isCurrent?' (mês atual).':'.')}>
+    ${needsBackup ? html`<div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-warn-soft px-4 py-3 text-sm text-warn" role="status">
+      <span class="font-medium">${backupDays === null ? 'Você ainda não baixou nenhum backup. Os dados ficam só neste navegador.' : 'Seu último backup foi há ' + backupDays + ' dias.'}</span>
+      <button class=${BTN_GHOST} onClick=${() => gotoTab('empresa')}><${Icon} name="download" size=${16} />Fazer backup</button>
+    </div>` : null}
+    <${PageHead} title="Painel de vendas" sub=${'Resumo de ' + monthLabel(mes) + (isCurrent ? ' (mês atual).' : '.')}>
       <div class="flex items-center gap-3">
         <span class="text-xs text-muted">Hoje: <strong>${fmtDate(new Date().toISOString())}</strong></span>
         <label class="flex items-center gap-2 text-sm font-medium text-ink">Mês
-          <select value=${mes} onChange=${e=>setMes(e.target.value)} class=${INPUT+' !w-auto'}>${months.map(k=>html`<option key=${k} value=${k}>${monthLabel(k)}${k===nowKey?' (Atual)':''}</option>`)}</select>
+          <select value=${mes} onChange=${e => setMes(e.target.value)} class=${INPUT + ' !w-auto'}>${months.map(k => html`<option key=${k} value=${k}>${monthLabel(k)}${k === nowKey ? ' (Atual)' : ''}</option>`)}</select>
         </label>
       </div>
     <//>
     <div class="grid gap-4 lg:grid-cols-3">
-      <section class="rounded-xl p-5 text-white" style=${{background:'var(--side)'}}>
-        <p class="text-sm text-white/70">${'Total vendido em '+monthLabel(mes)}</p>
+      <section class="rounded-xl p-5 text-white" style=${{ background: 'var(--side)' }}>
+        <p class="text-sm text-white/70">${'Total vendido em ' + monthLabel(mes)}</p>
         <p class="tnum mt-2 font-display text-4xl font-bold tracking-tight sm:text-5xl">${money(total)}</p>
         <dl class="mt-6 grid grid-cols-3 gap-3 border-t border-white/15 pt-4 text-sm">
           <div><dt class="text-white/60">Vendas</dt><dd class="tnum mt-0.5 text-xl font-semibold">${sales.length}</dd></div>
-          <div><dt class="text-white/60">Ticket médio</dt><dd class="tnum mt-0.5 text-xl font-semibold">${ticket?COMPACT.format(ticket):'0'}</dd></div>
-          <div><dt class="text-white/60">Unidades</dt><dd class="tnum mt-0.5 text-xl font-semibold">${unidades}</dd></div>
+          <div><dt class="text-white/60">Ticket médio</dt><dd class="tnum mt-0.5 text-xl font-semibold">${ticket ? compactMoney(ticket) : '0'}</dd></div>
+          <div><dt class="text-white/60">Unidades</dt><dd class="tnum mt-0.5 text-xl font-semibold">${fmtQty(unidades)}</dd></div>
         </dl>
       </section>
       <${Card} title="Faturamento dos últimos 6 meses" className="lg:col-span-2">
         <div class="p-4"><${MonthBars} sales=${db.sales} selected=${mes} onSelect=${setMes} /></div>
-        <p class="border-t border-line px-4 py-2 text-xs text-muted">Toque em uma barra para ver aquele mês.</p>
+        <p class="border-t border-line px-4 py-2 text-xs text-muted">Toque em uma barra para ver aquele mês. Vendas canceladas não entram.</p>
       <//>
     </div>
     <div class="mt-4 grid gap-4 lg:grid-cols-2">
       <${Card} title="Mais vendidos no mês">
-        ${top.length?html`<ul class="space-y-3 p-4">${top.map(([nome,q])=>html`<li key=${nome}><div class="flex items-baseline justify-between gap-3 text-sm"><span class="truncate text-ink">${nome}</span><span class="tnum shrink-0 font-semibold text-ink">${q} un.</span></div><div class="mt-1 h-1.5 rounded-full bg-canvas"><div class="h-1.5 rounded-full" style=${{width:(q/topMax*100)+'%',background:'var(--ember)'}}></div></div></li>`)}</ul>`:html`<p class="p-4 text-sm text-muted">Sem vendas neste mês.</p>`}
+        ${top.length ? html`<ul class="space-y-3 p-4">${top.map(([nome, q]) => html`<li key=${nome}><div class="flex items-baseline justify-between gap-3 text-sm"><span class="truncate text-ink">${nome}</span><span class="tnum shrink-0 font-semibold text-ink">${fmtQty(q)} un.</span></div><div class="mt-1 h-1.5 rounded-full bg-canvas"><div class="h-1.5 rounded-full" style=${{ width: (q / topMax * 100) + '%', background: 'var(--ember)' }}></div></div></li>`)}</ul>` : html`<p class="p-4 text-sm text-muted">Sem vendas neste mês.</p>`}
       <//>
       <${Card} title="Estoque para repor">
-        ${low.length?html`<ul class="divide-y divide-line">${low.map(p=>html`<li key=${p.id} class="flex items-center justify-between gap-3 px-4 py-3 text-sm"><span class="truncate text-ink">${p.nome}</span><span class="flex shrink-0 items-center gap-2"><span class="tnum font-semibold text-ink">${p.estoque} ${p.unidade||'un.'}</span><${Badge} tone=${p.estoque===0?'bad':'warn'}>${p.estoque===0?'Sem estoque':'Baixo'}<//></span></li>`)}</ul><div class="border-t border-line p-3"><button class=${BTN_GHOST} onClick=${()=>gotoTab('produtos')}>Atualizar estoque</button></div>`:html`<p class="p-4 text-sm text-muted">Todos os produtos estão acima do estoque mínimo.</p>`}
+        ${low.length ? html`<div><ul class="divide-y divide-line">${low.map(p => html`<li key=${p.id} class="flex items-center justify-between gap-3 px-4 py-3 text-sm"><span class="truncate text-ink">${p.nome}</span><span class="flex shrink-0 items-center gap-2"><span class="tnum font-semibold text-ink">${fmtQty(p.estoque)} ${p.unidade || 'un.'}</span><${Badge} tone=${p.estoque === 0 ? 'bad' : 'warn'}>${p.estoque === 0 ? 'Sem estoque' : 'Baixo'}<//></span></li>`)}</ul><div class="border-t border-line p-3"><button class=${BTN_GHOST} onClick=${() => gotoTab('produtos')}>Atualizar estoque</button></div></div>` : html`<p class="p-4 text-sm text-muted">Todos os produtos estão acima do estoque mínimo.</p>`}
       <//>
     </div>
-    <${Card} title=${'Histórico de vendas de '+monthLabel(mes)} className="mt-4" action=${html`<button class=${BTN_PRIMARY} onClick=${()=>gotoTab('venda')}><${Icon} name="plus" size=${16}/>Nova venda</button>`}>
-      ${sales.length?html`<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Nº</th><th class=${TH}>Data e hora</th><th class=${TH}>Cliente</th><th class=${TH}>Itens</th><th class=${TH+' text-right'}>Total</th><th class=${TH}><span class="sr-only">Ações</span></th></tr></thead><tbody class="divide-y divide-line">${sales.map(s=>html`<tr key=${s.id} class="hover:bg-canvas"><td class=${TD+' tnum font-medium text-ink'}>${pad(s.numero)}</td><td class=${TD+' tnum whitespace-nowrap text-muted'}>${fmtDate(s.data)} ${fmtTime(s.data)}</td><td class=${TD+' text-ink'}>${s.cliente.nome}</td><td class=${TD+' max-w-xs truncate text-muted'} title=${s.itens.map(i=>i.qtd+'x '+i.nome).join(', ')}>${s.itens.map(i=>i.qtd+'x '+i.nome).join(', ')}</td><td class=${TD+' tnum whitespace-nowrap text-right font-semibold text-ink'}>${money(s.totalCent)}</td><td class=${TD+' whitespace-nowrap text-right'}><button class=${ICON_BTN} title="Ver comprovante" onClick=${()=>openReceipt(s.id)}><${Icon} name="receipt" size=${17}/></button><button class=${ICON_BTN} title="Cancelar venda" onClick=${()=>askCancel(s)}><${Icon} name="trash" size=${16}/></button></td></tr>`)}</tbody></table></div>`:html`<p class="p-4 text-sm text-muted">Nenhuma venda neste mês.</p>`}
+    <${Card} title=${'Histórico de vendas de ' + monthLabel(mes)} className="mt-4" action=${html`<button class=${BTN_PRIMARY} onClick=${() => gotoTab('venda')}><${Icon} name="plus" size=${16} />Nova venda</button>`}>
+      ${history.length ? html`<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Nº</th><th class=${TH}>Data e hora</th><th class=${TH}>Cliente</th><th class=${TH}>Itens</th><th class=${TH + ' text-right'}>Total</th><th class=${TH}><span class="sr-only">Ações</span></th></tr></thead><tbody class="divide-y divide-line">${history.map(s => {
+        const canceled = s.status === 'Cancelada';
+        return html`<tr key=${s.id} class=${'hover:bg-canvas ' + (canceled ? 'opacity-60' : '')}>
+          <td class=${TD + ' tnum font-medium text-ink'}>${pad(s.numero)}</td>
+          <td class=${TD + ' tnum whitespace-nowrap text-muted'}>${fmtDate(s.data)} ${fmtTime(s.data)}</td>
+          <td class=${TD + ' text-ink'}>${s.cliente.nome} ${canceled ? html`<${Badge} tone="neutral">Cancelada<//>` : null}</td>
+          <td class=${TD + ' max-w-xs truncate text-muted'} title=${s.itens.map(i => fmtQty(i.qtd) + 'x ' + i.nome).join(', ')}>${s.itens.map(i => fmtQty(i.qtd) + 'x ' + i.nome).join(', ')}</td>
+          <td class=${TD + ' tnum whitespace-nowrap text-right font-semibold text-ink ' + (canceled ? 'line-through' : '')}>${money(s.totalCent)}</td>
+          <td class=${TD + ' whitespace-nowrap text-right'}>
+            <button class=${ICON_BTN} title="Ver comprovante" aria-label=${'Ver comprovante da venda ' + pad(s.numero)} onClick=${() => openReceipt(s.id)}><${Icon} name="receipt" size=${17} /></button>
+            ${canceled ? null : html`<button class=${ICON_BTN} title="Cancelar venda" aria-label=${'Cancelar venda ' + pad(s.numero)} onClick=${() => askCancel(s)}><${Icon} name="trash" size=${16} /></button>`}
+          </td>
+        </tr>`;
+      })}</tbody></table></div>` : html`<p class="p-4 text-sm text-muted">Nenhuma venda neste mês.</p>`}
     <//>
   </div>`;
 }
+
+/* ---------- Fechamento mensal ---------- */
+const EXPENSE_CATEGORIES = ['Outros', 'Embalagens', 'Transporte', 'Contas', 'Impostos', 'Pessoal'];
+
 function FechamentoMensal({ db, setDb, notify, askConfirm }) {
-  const nowKey=getCurrentMonthKey(); const [mes,setMes]=useState(nowKey); const [desc,setDesc]=useState(''); const [valor,setValor]=useState(''); const [categoria,setCategoria]=useState('Outros'); const [err,setErr]=useState('');
-  const months=useMemo(()=>{const s=new Set([nowKey]);db.sales.forEach(x=>s.add(monthKey(x.data)));(db.expenses||[]).forEach(x=>s.add(monthKey(x.data)));return [...s].sort().reverse()},[db.sales,db.expenses,nowKey]);
-  const sales=db.sales.filter(s=>monthKey(s.data)===mes && s.status!=='Cancelada'), expenses=(db.expenses||[]).filter(e=>monthKey(e.data)===mes);
-  const faturamento=sales.reduce((a,s)=>a+s.totalCent,0), custos=sales.reduce((a,s)=>a+s.itens.reduce((x,i)=>x+i.qtd*(i.custoCent||0),0),0), despesas=expenses.reduce((a,e)=>a+e.valorCent,0), lucro=faturamento-custos-despesas;
-  const addExpense=()=>{setErr('');const d=desc.trim(),v=parseNum(valor);if(!d)return setErr('Informe a descrição.');if(!(v>0))return setErr('Informe um valor válido.');const e={id:uid(),descricao:d,categoria,valorCent:toCents(v),data:new Date().toISOString()};setDb(x=>({...x,expenses:[e,...(x.expenses||[])]}));setDesc('');setValor('');notify('Despesa registrada.');};
-  const removeExpense=e=>askConfirm({title:'Excluir despesa',message:'Remover '+e.descricao+'? ',confirmLabel:'Excluir',onConfirm:()=>{setDb(x=>({...x,expenses:(x.expenses||[]).filter(z=>z.id!==e.id)}));notify('Despesa removida.')}});
-  return html`<div><${PageHead} title="Fechamento Mensal" sub="Apuração de faturamento, custo das mercadorias vendidas, despesas e lucro."><select value=${mes} onChange=${e=>setMes(e.target.value)} class=${INPUT+' !w-auto'}>${months.map(k=>html`<option value=${k}>${monthLabel(k)}</option>`)}</select></${PageHead}>
-    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">${[['Faturamento',faturamento,'text-ok'],['Custos dos produtos',custos,'text-warn'],['Despesas',despesas,'text-bad'],['Lucro líquido',lucro,lucro>=0?'text-ok':'text-bad']].map(([t,v,c])=>html`<div class="rounded-xl border border-line bg-surface p-5"><p class="text-sm text-muted">${t}</p><p class=${'tnum mt-2 text-3xl font-bold '+c}>${money(v)}</p></div>`)}</div>
-    <div class="mt-4 grid gap-4 lg:grid-cols-3"><${Card} title="Registrar despesa" className="self-start"><div class="space-y-4 p-4" onKeyDown=${enterSubmit(addExpense)}><${Field} label="Descrição"><input class=${INPUT} value=${desc} onChange=${e=>setDesc(e.target.value)} placeholder="Ex.: combustível" /><//><${Field} label="Categoria"><select class=${INPUT} value=${categoria} onChange=${e=>setCategoria(e.target.value)}><option>Outros</option><option>Embalagens</option><option>Transporte</option><option>Contas</option><option>Matéria-prima</option></select><//><${Field} label="Valor (R$)"><input class=${INPUT} inputMode="decimal" value=${valor} onChange=${e=>setValor(e.target.value)} placeholder="0,00" /><//><${ErrorNote} msg=${err}/><button class=${BTN_PRIMARY+' w-full'} onClick=${addExpense}>Registrar despesa</button></div></${Card}>
-      <${Card} title=${'Despesas de '+monthLabel(mes)} className="lg:col-span-2">${expenses.length?html`<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Descrição</th><th class=${TH}>Categoria</th><th class=${TH+' text-right'}>Valor</th><th class=${TH}></th></tr></thead><tbody class="divide-y divide-line">${expenses.map(e=>html`<tr><td class=${TD}>${e.descricao}</td><td class=${TD}>${e.categoria}</td><td class=${TD+' text-right font-semibold'}>${money(e.valorCent)}</td><td class=${TD+' text-right'}><button class=${ICON_BTN} onClick=${()=>removeExpense(e)}><${Icon} name="trash" size=${16}/></button></td></tr>`)}</tbody></table></div>`:html`<p class="p-4 text-sm text-muted">Nenhuma despesa registrada.</p>`}</${Card}>
+  const nowKey = getCurrentMonthKey();
+  const [mes, setMes] = useState(nowKey);
+  const [desc, setDesc] = useState('');
+  const [valor, setValor] = useState('');
+  const [categoria, setCategoria] = useState('Outros');
+  const [dataDesp, setDataDesp] = useState(todayStr());
+  const [err, setErr] = useState('');
+
+  const months = useMemo(() => {
+    const s = new Set([nowKey]);
+    db.sales.forEach(x => s.add(monthKey(x.data)));
+    (db.expenses || []).forEach(x => s.add(monthKey(x.data)));
+    return [...s].sort().reverse();
+  }, [db.sales, db.expenses, nowKey]);
+
+  const sales = db.sales.filter(s => monthKey(s.data) === mes && s.status !== 'Cancelada');
+  const expenses = (db.expenses || []).filter(e => monthKey(e.data) === mes).sort((a, b) => b.data.localeCompare(a.data));
+  const custoVenda = s => s.itens.reduce((x, i) => x + Math.round(i.qtd * (i.custoCent || 0)), 0);
+  const faturamento = sales.reduce((a, s) => a + s.totalCent, 0);
+  const custos = sales.reduce((a, s) => a + custoVenda(s), 0);
+  const despesas = expenses.reduce((a, e) => a + e.valorCent, 0);
+  const lucro = faturamento - custos - despesas;
+
+  const addExpense = () => {
+    setErr('');
+    const d = desc.trim();
+    const v = parseNum(valor);
+    if (!d) return setErr('Informe a descrição.');
+    if (!(v > 0)) return setErr('Informe um valor válido.');
+    if (!dataDesp) return setErr('Informe a data da despesa.');
+    const [y, m, dia] = dataDesp.split('-').map(Number);
+    const iso = new Date(y, m - 1, dia, 12).toISOString();
+    const e = { id: uid(), descricao: d, categoria, valorCent: toCents(v), data: iso };
+    setDb(x => ({ ...x, expenses: [e, ...(x.expenses || [])] }));
+    setDesc(''); setValor(''); setDataDesp(todayStr());
+    notify('Despesa registrada em ' + monthLabel(monthKey(iso)) + '.');
+  };
+  const removeExpense = e => askConfirm({
+    title: 'Excluir despesa', message: 'Remover "' + e.descricao + '"?', confirmLabel: 'Excluir',
+    onConfirm: () => { setDb(x => ({ ...x, expenses: (x.expenses || []).filter(z => z.id !== e.id) })); notify('Despesa removida.'); }
+  });
+
+  const exportCsv = () => {
+    const rows = [];
+    rows.push(['Fechamento mensal', monthLabel(mes)]);
+    rows.push(['Faturamento', csvMoney(faturamento)]);
+    rows.push(['Custo dos produtos vendidos', csvMoney(custos)]);
+    rows.push(['Despesas', csvMoney(despesas)]);
+    rows.push(['Lucro líquido', csvMoney(lucro)]);
+    rows.push([]);
+    rows.push(['VENDAS']);
+    rows.push(['Nº', 'Data', 'Cliente', 'CPF/CNPJ', 'Pagamento', 'Itens', 'Subtotal', 'Desconto', 'Total', 'Custo']);
+    sales.slice().sort((a, b) => a.data.localeCompare(b.data)).forEach(s => {
+      rows.push([pad(s.numero), fmtDate(s.data), s.cliente.nome, s.cliente.doc || '', s.pagamento, s.itens.map(i => fmtQty(i.qtd) + 'x ' + i.nome).join(' + '), csvMoney(s.subtotalCent), csvMoney(s.descontoCent), csvMoney(s.totalCent), csvMoney(custoVenda(s))]);
+    });
+    rows.push([]);
+    rows.push(['DESPESAS']);
+    rows.push(['Data', 'Descrição', 'Categoria', 'Valor']);
+    expenses.slice().sort((a, b) => a.data.localeCompare(b.data)).forEach(e => rows.push([fmtDate(e.data), e.descricao, e.categoria, csvMoney(e.valorCent)]));
+    const csv = '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\r\n');
+    try { downloadFile('fechamento_' + mes + '.csv', csv, 'text/csv;charset=utf-8'); notify('Arquivo CSV baixado.'); }
+    catch (e) { notify('Não foi possível baixar o CSV.', 'bad'); }
+  };
+
+  const cards = [['Faturamento', faturamento, 'text-ok'], ['Custos dos produtos', custos, 'text-warn'], ['Despesas', despesas, 'text-bad'], ['Lucro líquido', lucro, lucro >= 0 ? 'text-ok' : 'text-bad']];
+
+  return html`<div>
+    <${PageHead} title="Fechamento Mensal" sub="Apuração por competência: vendas do mês, custo dos produtos vendidos, despesas e lucro. Não considera se o boleto já foi pago.">
+      <div class="flex flex-wrap items-center gap-2">
+        <button class=${BTN_GHOST} onClick=${exportCsv}><${Icon} name="download" size=${16} />Exportar CSV</button>
+        <select value=${mes} onChange=${e => setMes(e.target.value)} class=${INPUT + ' !w-auto'} aria-label="Mês do fechamento">${months.map(k => html`<option key=${k} value=${k}>${monthLabel(k)}</option>`)}</select>
+      </div>
+    <//>
+    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">${cards.map(([t, v, c]) => html`<div key=${t} class="rounded-xl border border-line bg-surface p-5"><p class="text-sm text-muted">${t}</p><p class=${'tnum mt-2 text-3xl font-bold ' + c}>${money(v)}</p></div>`)}</div>
+    <div class="mt-4 grid gap-4 lg:grid-cols-3">
+      <${Card} title="Registrar despesa" className="self-start">
+        <div class="space-y-4 p-4" onKeyDown=${enterSubmit(addExpense)}>
+          <${Field} label="Descrição"><input class=${INPUT} value=${desc} onChange=${e => setDesc(e.target.value)} placeholder="Ex.: combustível" /><//>
+          <div class="grid grid-cols-2 gap-2">
+            <${Field} label="Valor (R$)"><input class=${INPUT} inputMode="decimal" value=${valor} onChange=${e => setValor(e.target.value)} placeholder="0,00" /><//>
+            <${Field} label="Data"><input class=${INPUT} type="date" value=${dataDesp} onChange=${e => setDataDesp(e.target.value)} /><//>
+          </div>
+          <${Field} label="Categoria" hint="Não lance aqui a compra de carvão para revenda: o custo já entra pelo preço de custo dos produtos vendidos.">
+            <select class=${INPUT} value=${categoria} onChange=${e => setCategoria(e.target.value)}>${EXPENSE_CATEGORIES.map(c => html`<option key=${c} value=${c}>${c}</option>`)}</select>
+          <//>
+          <${ErrorNote} msg=${err} />
+          <button class=${BTN_PRIMARY + ' w-full'} onClick=${addExpense}>Registrar despesa</button>
+        </div>
+      <//>
+      <${Card} title=${'Despesas de ' + monthLabel(mes)} className="lg:col-span-2">
+        ${expenses.length ? html`<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Data</th><th class=${TH}>Descrição</th><th class=${TH}>Categoria</th><th class=${TH + ' text-right'}>Valor</th><th class=${TH}><span class="sr-only">Ações</span></th></tr></thead><tbody class="divide-y divide-line">${expenses.map(e => html`<tr key=${e.id}><td class=${TD + ' tnum whitespace-nowrap text-muted'}>${fmtDate(e.data)}</td><td class=${TD}>${e.descricao}</td><td class=${TD}>${e.categoria}</td><td class=${TD + ' tnum text-right font-semibold'}>${money(e.valorCent)}</td><td class=${TD + ' text-right'}><button class=${ICON_BTN} title="Excluir despesa" aria-label=${'Excluir despesa ' + e.descricao} onClick=${() => removeExpense(e)}><${Icon} name="trash" size=${16} /></button></td></tr>`)}</tbody></table></div>` : html`<p class="p-4 text-sm text-muted">Nenhuma despesa registrada neste mês.</p>`}
+      <//>
     </div>
   </div>`;
 }
+
+/* ---------- Nova venda ---------- */
 function NewSale({ db, onFinalize, gotoTab }) {
   const [clienteId, setClienteId] = useState('');
   const [buscaCliente, setBuscaCliente] = useState('');
@@ -549,27 +747,28 @@ function NewSale({ db, onFinalize, gotoTab }) {
   const clientesFiltrados = useMemo(() => {
     const q = buscaCliente.trim().toLowerCase();
     if (!q) return db.clients;
-    return db.clients.filter(c => (c.nome || '').toLowerCase().includes(q) || (c.doc || '').includes(q) || (c.tel || '').includes(q));
+    const qd = onlyDigits(q);
+    return db.clients.filter(c => (c.nome || '').toLowerCase().includes(q) || (c.doc || '').includes(q) || (c.tel || '').includes(q) || (qd && (onlyDigits(c.doc).includes(qd) || onlyDigits(c.tel).includes(qd))));
   }, [db.clients, buscaCliente]);
 
   const produto = db.products.find(p => p.id === produtoId);
   const noCarrinho = produto ? (itens.find(i => i.produtoId === produto.id) || { qtd: 0 }).qtd : 0;
   const qn = parseNum(qtd);
-  const preview = produto && qn > 0 ? qn * (produto.precoCent || 0) : 0;
-  const subtotalCent = Math.round(itens.reduce((a, i) => a + i.qtd * i.precoCent, 0));
+  const preview = produto && qn > 0 ? Math.round(qn * (produto.precoCent || 0)) : 0;
+  const subtotalCent = itens.reduce((a, i) => a + lineCent(i), 0);
   const descontoCent = Math.min(Math.max(0, toCents(parseNum(desconto))), subtotalCent);
   const totalCent = Math.max(0, subtotalCent - descontoCent);
 
   const addItem = () => {
     setErr('');
     if (!produto) return setErr('Escolha um produto.');
-    if (!Number.isInteger(qn) || qn < 1) return setErr('Informe uma quantidade inteira, de 1 em diante.');
-    const disponivel = produto.estoque - noCarrinho;
-    if (qn > disponivel) return setErr('Estoque insuficiente: restam ' + disponivel + ' ' + (produto.unidade || 'un.') + '.');
+    if (!validQty(qn, produto.unidade, false)) return setErr(isKg(produto.unidade) ? 'Informe uma quantidade maior que zero (pode ter vírgula).' : 'Informe uma quantidade inteira, de 1 em diante.');
+    const disponivel = round3(produto.estoque - noCarrinho);
+    if (qn > disponivel) return setErr('Estoque insuficiente: restam ' + fmtQty(disponivel) + ' ' + (produto.unidade || 'un.') + '.');
     setItens(list => {
       const ex = list.find(i => i.produtoId === produto.id);
-      if (ex) return list.map(i => i.produtoId === produto.id ? { ...i, qtd: i.qtd + qn } : i);
-      return [...list, { produtoId: produto.id, nome: produto.nome, qtd: qn, precoCent: produto.precoCent, custoCent: produto.custoCent || 0 }];
+      if (ex) return list.map(i => i.produtoId === produto.id ? { ...i, qtd: round3(i.qtd + qn) } : i);
+      return [...list, { produtoId: produto.id, nome: produto.nome, qtd: round3(qn), precoCent: produto.precoCent, custoCent: produto.custoCent || 0 }];
     });
     setProdutoId(''); setQtd('1'); setErrCart('');
   };
@@ -581,7 +780,7 @@ function NewSale({ db, onFinalize, gotoTab }) {
       const dias = parseNum(prazoDias);
       if (!Number.isInteger(dias) || dias < 1) return setErrCart('Informe a quantidade de dias do boleto.');
     }
-    onFinalize({ clienteId, itens, pagamento, descontoCent, prazoDias: pagamento === 'Boleto' ? Number(prazoDias) : 0 });
+    onFinalize({ clienteId, itens, pagamento, descontoCent, prazoDias: pagamento === 'Boleto' ? Number(parseNum(prazoDias)) : 0 });
     setItens([]); setClienteId(''); setBuscaCliente(''); setProdutoId(''); setQtd('1'); setDesconto(''); setPagamento('Pix'); setErr('');
   };
 
@@ -597,38 +796,40 @@ function NewSale({ db, onFinalize, gotoTab }) {
     <${PageHead} title="Nova venda" sub="A busca apenas filtra. O cliente só é selecionado depois que você clicar nele na lista. O estoque é baixado automaticamente." />
     <div class="grid gap-4 lg:grid-cols-5">
       <${Card} title="Adicionar item" className="lg:col-span-2 self-start">
-        <div class="space-y-4 p-4" onKeyDown=${enterSubmit(addItem)}>
+        <div class="space-y-4 p-4">
           <div class="space-y-2">
             <span class="block text-sm font-medium text-ink">Cliente</span>
             <div class="relative"><span class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted"><${Icon} name="search" size=${15} /></span>
-              <input class=${INPUT + ' pl-8'} value=${buscaCliente} onChange=${e => { setBuscaCliente(e.target.value); setClienteId(''); }} placeholder="Digite o nome para filtrar..." />
+              <input class=${INPUT + ' pl-8'} value=${buscaCliente} onChange=${e => { setBuscaCliente(e.target.value); setClienteId(''); }} placeholder="Digite nome, CPF/CNPJ ou telefone..." />
             </div>
             <div class="rounded-lg border border-line bg-surface divide-y divide-line max-h-44 overflow-auto">
               ${clientesFiltrados.length ? clientesFiltrados.map(c => html`<button type="button" key=${c.id} onClick=${() => { setClienteId(c.id); setBuscaCliente(c.nome); }} class=${'w-full px-3 py-2 text-left text-sm hover:bg-canvas ' + (clienteId === c.id ? 'bg-ember-soft font-semibold' : '')}>
                 <span class="block">${c.nome}</span><span class="block text-xs text-muted">${c.doc || c.tel || ''}</span>
               </button>`) : html`<p class="p-3 text-sm text-muted">Nenhum cliente encontrado.</p>`}
             </div>
-            ${clienteId ? html`<p class="text-xs font-medium text-ok">Cliente selecionado: ${db.clients.find(c => c.id === clienteId)?.nome}</p>` : html`<p class="text-xs text-muted">Nenhum cliente selecionado.</p>`}
+            ${clienteId ? html`<p class="text-xs font-medium text-ok">Cliente selecionado: ${(db.clients.find(c => c.id === clienteId) || {}).nome}</p>` : html`<p class="text-xs text-muted">Nenhum cliente selecionado.</p>`}
           </div>
-          <${Field} label="Produto">
-            <select class=${INPUT} value=${produtoId} onChange=${e => { setProdutoId(e.target.value); setErr(''); }}>
-              <option value="">Selecione o produto</option>
-              ${db.products.map(p => html`<option key=${p.id} value=${p.id} disabled=${p.estoque === 0}>${p.nome + ' - ' + money(p.precoCent) + (p.estoque === 0 ? ' (sem estoque)' : ' (' + p.estoque + ' ' + (p.unidade || 'un.') + ')')}</option>`)}
-            </select>
-          <//>
-          <${Field} label="Quantidade" hint=${produto ? 'Disponível: ' + (produto.estoque - noCarrinho) + ' ' + (produto.unidade || 'un.') : null}><input class=${INPUT} inputMode="numeric" value=${qtd} onChange=${e => setQtd(e.target.value)} placeholder="1" /><//>
-          <div class="flex items-center justify-between rounded-lg bg-canvas px-3 py-2 text-sm"><span class="text-muted">Subtotal do item</span><span class="tnum font-semibold text-ink">${money(preview)}</span></div>
-          <${ErrorNote} msg=${err} />
-          <button class=${BTN_GHOST + ' w-full'} onClick=${addItem}><${Icon} name="plus" size=${16} />Adicionar à venda</button>
+          <div class="space-y-4" onKeyDown=${enterSubmit(addItem)}>
+            <${Field} label="Produto">
+              <select class=${INPUT} value=${produtoId} onChange=${e => { setProdutoId(e.target.value); setErr(''); }}>
+                <option value="">Selecione o produto</option>
+                ${db.products.map(p => html`<option key=${p.id} value=${p.id} disabled=${p.estoque === 0}>${p.nome + ' - ' + money(p.precoCent) + (p.estoque === 0 ? ' (sem estoque)' : ' (' + fmtQty(p.estoque) + ' ' + (p.unidade || 'un.') + ')')}</option>`)}
+              </select>
+            <//>
+            <${Field} label="Quantidade" hint=${produto ? 'Disponível: ' + fmtQty(produto.estoque - noCarrinho) + ' ' + (produto.unidade || 'un.') : null}><input class=${INPUT} inputMode=${produto && isKg(produto.unidade) ? 'decimal' : 'numeric'} value=${qtd} onChange=${e => setQtd(e.target.value)} placeholder="1" /><//>
+            <div class="flex items-center justify-between rounded-lg bg-canvas px-3 py-2 text-sm"><span class="text-muted">Subtotal do item</span><span class="tnum font-semibold text-ink">${money(preview)}</span></div>
+            <${ErrorNote} msg=${err} />
+            <button class=${BTN_GHOST + ' w-full'} onClick=${addItem}><${Icon} name="plus" size=${16} />Adicionar à venda</button>
+          </div>
         </div>
       <//>
       <${Card} title="Itens da venda" className="lg:col-span-3 self-start">
         ${itens.length ? html`<div class="overflow-x-auto"><table class="w-full text-sm">
-          <thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Produto</th><th class=${TH + ' text-right'}>Qtd.</th><th class=${TH + ' text-right'}>Unitário</th><th class=${TH + ' text-right'}>Total</th><th class=${TH}></th></tr></thead>
-          <tbody class="divide-y divide-line">${itens.map(i => html`<tr key=${i.produtoId}><td class=${TD}>${i.nome}</td><td class=${TD + ' tnum text-right'}>${i.qtd}</td><td class=${TD + ' tnum text-right'}>${money(i.precoCent)}</td><td class=${TD + ' tnum text-right font-semibold'}>${money(i.qtd*i.precoCent)}</td><td class=${TD + ' text-right'}><button class=${ICON_BTN} onClick=${() => setItens(l => l.filter(x => x.produtoId !== i.produtoId))}><${Icon} name="x" size=${16}/></button></td></tr>`)}</tbody></table></div>` : html`<${Empty} icon="cart" title="Nenhum item adicionado">Escolha um produto e a quantidade ao lado.<//>`}
+          <thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Produto</th><th class=${TH + ' text-right'}>Qtd.</th><th class=${TH + ' text-right'}>Unitário</th><th class=${TH + ' text-right'}>Total</th><th class=${TH}><span class="sr-only">Remover</span></th></tr></thead>
+          <tbody class="divide-y divide-line">${itens.map(i => html`<tr key=${i.produtoId}><td class=${TD}>${i.nome}</td><td class=${TD + ' tnum text-right'}>${fmtQty(i.qtd)}</td><td class=${TD + ' tnum text-right'}>${money(i.precoCent)}</td><td class=${TD + ' tnum text-right font-semibold'}>${money(lineCent(i))}</td><td class=${TD + ' text-right'}><button class=${ICON_BTN} title="Remover item" aria-label=${'Remover ' + i.nome} onClick=${() => setItens(l => l.filter(x => x.produtoId !== i.produtoId))}><${Icon} name="x" size=${16} /></button></td></tr>`)}</tbody></table></div>` : html`<${Empty} icon="cart" title="Nenhum item adicionado">Escolha um produto e a quantidade ao lado.<//>`}
         <div class="space-y-4 border-t border-line p-4">
           <div class="grid gap-3 sm:grid-cols-3">
-            <${Field} label="Forma de pagamento"><select class=${INPUT} value=${pagamento} onChange=${e => setPagamento(e.target.value)}>${['Pix','Dinheiro','Cartão','Transferência','Boleto'].map(p => html`<option key=${p} value=${p}>${p}</option>`)}</select><//>
+            <${Field} label="Forma de pagamento"><select class=${INPUT} value=${pagamento} onChange=${e => setPagamento(e.target.value)}>${['Pix', 'Dinheiro', 'Cartão', 'Transferência', 'Boleto'].map(p => html`<option key=${p} value=${p}>${p}</option>`)}</select><//>
             <${Field} label="Desconto (R$)"><input class=${INPUT} inputMode="decimal" value=${desconto} onChange=${e => setDesconto(e.target.value)} placeholder="0,00" /><//>
             ${pagamento === 'Boleto' ? html`<${Field} label="Prazo do boleto (dias)"><input class=${INPUT} inputMode="numeric" value=${prazoDias} onChange=${e => setPrazoDias(e.target.value)} placeholder="30" /><//>` : null}
           </div>
@@ -641,6 +842,7 @@ function NewSale({ db, onFinalize, gotoTab }) {
   </div>`;
 }
 
+/* ---------- Produtos e estoque ---------- */
 function Products({ db, setDb, notify, askConfirm }) {
   const empty = { nome: '', custo: '', preco: '', estoque: '', minimo: '20', unidade: 'saco' };
   const [form, setForm] = useState(empty);
@@ -648,6 +850,7 @@ function Products({ db, setDb, notify, askConfirm }) {
   const [err, setErr] = useState('');
   const [showEntry, setShowEntry] = useState(false);
   const [entry, setEntry] = useState({ produtoId: '', qtd: '', observacao: '' });
+  const [adjust, setAdjust] = useState(null);
   const [showMoves, setShowMoves] = useState(false);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
@@ -655,23 +858,28 @@ function Products({ db, setDb, notify, askConfirm }) {
 
   const submit = () => {
     const nome = form.nome.trim();
-    const custoCent = toCents(parseNum(form.custo));
-    const precoCent = toCents(parseNum(form.preco));
-    const estoque = parseNum(form.estoque);
+    const unidade = form.unidade || 'saco';
+    const custo = form.custo.trim() === '' ? 0 : parseNum(form.custo);
+    const preco = parseNum(form.preco);
     const minimo = form.minimo.trim() === '' ? 0 : parseNum(form.minimo);
     if (!nome) return setErr('Informe o nome do produto.');
-    if (custoCent < 0 || precoCent < 0) return setErr('Informe custo e preço de venda válidos.');
-    if (!Number.isInteger(estoque) || estoque < 0) return setErr('O estoque deve ser um número inteiro, zero ou maior.');
-    if (!Number.isInteger(minimo) || minimo < 0) return setErr('O estoque mínimo deve ser um número inteiro, zero ou maior.');
-    const data = { nome, custoCent, precoCent, estoque, minimo, unidade: form.unidade || 'un.' };
+    if (!Number.isFinite(custo) || custo < 0) return setErr('Informe um preço de custo válido (ou deixe em branco).');
+    if (!Number.isFinite(preco) || preco <= 0) return setErr('Informe o preço de venda.');
+    if (!validQty(minimo, unidade, true)) return setErr('Estoque mínimo inválido. ' + qtyMsg(unidade));
+    const custoCent = toCents(custo);
+    const precoCent = toCents(preco);
     if (editId) {
-      setDb(d => ({ ...d, products: d.products.map(p => p.id === editId ? { ...p, ...data } : p) }));
+      const cur = db.products.find(p => p.id === editId);
+      if (cur && !isKg(unidade) && !Number.isInteger(cur.estoque)) return setErr('Este produto tem saldo fracionado. Mantenha a unidade em kg ou ajuste o estoque antes.');
+      setDb(d => ({ ...d, products: d.products.map(p => p.id === editId ? { ...p, nome, custoCent, precoCent, minimo, unidade } : p) }));
       notify('Produto atualizado.');
     } else {
+      const estoque = form.estoque.trim() === '' ? 0 : parseNum(form.estoque);
+      if (!validQty(estoque, unidade, true)) return setErr('Quantidade inicial inválida. ' + qtyMsg(unidade));
       const id = uid();
       setDb(d => ({
-        ...d, products: [...d.products, { id, ...data }],
-        movements: [{ id: uid(), produtoId: id, tipo: 'Entrada', qtd: estoque, saldoAnterior: 0, saldoNovo: estoque, motivo: 'Estoque inicial', data: new Date().toISOString() }, ...(d.movements || [])]
+        ...d, products: [...d.products, { id, nome, custoCent, precoCent, estoque: round3(estoque), minimo, unidade }],
+        movements: [{ id: uid(), produtoId: id, tipo: 'Entrada', qtd: round3(estoque), saldoAnterior: 0, saldoNovo: round3(estoque), motivo: 'Estoque inicial', data: new Date().toISOString() }, ...(d.movements || [])]
       }));
       notify('Produto cadastrado.');
     }
@@ -680,42 +888,46 @@ function Products({ db, setDb, notify, askConfirm }) {
 
   const startEdit = p => {
     setEditId(p.id); setErr('');
-    setForm({ nome: p.nome, custo: String(fromCents(p.custoCent || 0)).replace('.', ','), preco: String(fromCents(p.precoCent || 0)).replace('.', ','), estoque: String(p.estoque), minimo: String(p.minimo), unidade: p.unidade || 'saco' });
+    setForm({ nome: p.nome, custo: String(fromCents(p.custoCent || 0)).replace('.', ','), preco: String(fromCents(p.precoCent || 0)).replace('.', ','), estoque: fmtQty(p.estoque), minimo: fmtQty(p.minimo), unidade: p.unidade || 'saco' });
   };
 
   const openEntry = p => { setEntry({ produtoId: p ? p.id : '', qtd: '', observacao: '' }); setShowEntry(true); };
+  const entryProduct = db.products.find(x => x.id === entry.produtoId);
   const registerEntry = () => {
-    const p = db.products.find(x => x.id === entry.produtoId);
+    const p = entryProduct;
     const qtd = parseNum(entry.qtd);
     if (!p) return notify('Selecione o produto.', 'bad');
-    if (!Number.isInteger(qtd) || qtd <= 0) return notify('Informe uma quantidade inteira maior que zero.', 'bad');
+    if (!validQty(qtd, p.unidade, false)) return notify(isKg(p.unidade) ? 'Informe uma quantidade maior que zero.' : 'Informe uma quantidade inteira maior que zero.', 'bad');
     const now = new Date().toISOString();
     setDb(d => {
       const cur = d.products.find(x => x.id === p.id);
-      const novo = cur.estoque + qtd;
+      if (!cur) return d;
+      const novo = round3(cur.estoque + qtd);
       return {
         ...d,
         products: d.products.map(x => x.id === p.id ? { ...x, estoque: novo } : x),
-        movements: [{ id: uid(), produtoId: p.id, tipo: 'Entrada', qtd, saldoAnterior: cur.estoque, saldoNovo: novo, motivo: entry.observacao.trim() || 'Entrada de estoque', data: now }, ...(d.movements || [])]
+        movements: [{ id: uid(), produtoId: p.id, tipo: 'Entrada', qtd: round3(qtd), saldoAnterior: cur.estoque, saldoNovo: novo, motivo: entry.observacao.trim() || 'Entrada de estoque', data: now }, ...(d.movements || [])]
       };
     });
     setShowEntry(false); setEntry({ produtoId: '', qtd: '', observacao: '' }); notify('Entrada de estoque registrada.');
   };
 
-  const adjustStock = p => {
-    const raw = prompt('Informe a quantidade atual correta de "' + p.nome + '".');
-    if (raw === null) return;
-    const novo = parseNum(raw);
-    if (!Number.isInteger(novo) || novo < 0) return notify('Quantidade inválida.', 'bad');
-    const diff = novo - p.estoque;
-    if (diff === 0) return notify('Nenhuma alteração no estoque.');
-    const motivo = prompt('Motivo do ajuste (opcional):') || 'Ajuste de estoque';
+  const openAdjust = p => setAdjust({ id: p.id, nome: p.nome, unidade: p.unidade || 'un.', saldo: p.estoque, qtd: '', motivo: '' });
+  const saveAdjust = () => {
+    const p = db.products.find(x => x.id === adjust.id);
+    if (!p) { setAdjust(null); return; }
+    const novo = parseNum(adjust.qtd);
+    if (!validQty(novo, p.unidade, true)) return notify('Quantidade inválida. ' + qtyMsg(p.unidade), 'bad');
+    const diff = round3(novo - p.estoque);
+    if (diff === 0) { setAdjust(null); return notify('Nenhuma alteração no estoque.'); }
+    const motivo = adjust.motivo.trim() || 'Ajuste de estoque';
     const tipo = diff > 0 ? 'Entrada de ajuste' : 'Baixa de ajuste';
     setDb(d => ({
       ...d,
-      products: d.products.map(x => x.id === p.id ? { ...x, estoque: novo } : x),
-      movements: [{ id: uid(), produtoId: p.id, tipo, qtd: Math.abs(diff), saldoAnterior: p.estoque, saldoNovo: novo, motivo, data: new Date().toISOString() }, ...(d.movements || [])]
+      products: d.products.map(x => x.id === p.id ? { ...x, estoque: round3(novo) } : x),
+      movements: [{ id: uid(), produtoId: p.id, tipo, qtd: Math.abs(diff), saldoAnterior: p.estoque, saldoNovo: round3(novo), motivo, data: new Date().toISOString() }, ...(d.movements || [])]
     }));
+    setAdjust(null);
     notify('Ajuste de estoque registrado.');
   };
 
@@ -724,7 +936,9 @@ function Products({ db, setDb, notify, askConfirm }) {
     onConfirm: () => { setDb(d => ({ ...d, products: d.products.filter(x => x.id !== p.id) })); if (editId === p.id) reset(); notify('Produto excluído.'); }
   });
 
-  const valorEstoque = db.products.reduce((a, p) => a + (p.custoCent || 0) * p.estoque, 0);
+  const valorEstoque = db.products.reduce((a, p) => a + Math.round((p.custoCent || 0) * p.estoque), 0);
+  const precoForm = toCents(parseNum(form.preco));
+  const custoForm = toCents(parseNum(form.custo));
 
   return html`<div>
     <${PageHead} title="Produtos e Estoque" sub="Custo, venda, margem e saldo. Use Entrada de estoque quando comprar ou receber mercadoria.">
@@ -743,14 +957,14 @@ function Products({ db, setDb, notify, askConfirm }) {
             <${Field} label="Preço de venda (R$)"><input class=${INPUT} inputMode="decimal" value=${form.preco} onChange=${e => set('preco', e.target.value)} placeholder="12,00" /><//>
           </div>
           <div class="rounded-lg bg-canvas p-3 text-sm">
-            <div class="flex justify-between"><span class="text-muted">Lucro unitário</span><strong>${money((toCents(parseNum(form.preco)) - toCents(parseNum(form.custo))))}</strong></div>
-            <div class="mt-1 flex justify-between"><span class="text-muted">Margem</span><strong>${toCents(parseNum(form.preco)) > 0 ? ((toCents(parseNum(form.preco))-toCents(parseNum(form.custo))) / toCents(parseNum(form.preco)) * 100).toFixed(2).replace('.', ',') + '%' : '0,00%'}</strong></div>
+            <div class="flex justify-between"><span class="text-muted">Lucro unitário</span><strong>${money(precoForm - custoForm)}</strong></div>
+            <div class="mt-1 flex justify-between"><span class="text-muted">Margem</span><strong>${precoForm > 0 ? ((precoForm - custoForm) / precoForm * 100).toFixed(2).replace('.', ',') + '%' : '0,00%'}</strong></div>
           </div>
           <div class="grid grid-cols-2 gap-2">
-            <${Field} label=${editId ? 'Saldo atual' : 'Quantidade inicial'}><input class=${INPUT} inputMode="numeric" value=${form.estoque} onChange=${e => set('estoque', e.target.value)} placeholder="0" /><//>
+            <${Field} label=${editId ? 'Saldo atual' : 'Quantidade inicial'} hint=${editId ? 'Para mudar o saldo, use Entrada ou Ajustar estoque.' : null}><input class=${INPUT + (editId ? ' opacity-60 cursor-not-allowed' : '')} disabled=${!!editId} inputMode=${isKg(form.unidade) ? 'decimal' : 'numeric'} value=${form.estoque} onChange=${e => set('estoque', e.target.value)} placeholder="0" /><//>
             <${Field} label="Unidade"><select class=${INPUT} value=${form.unidade} onChange=${e => set('unidade', e.target.value)}><option value="saco">saco</option><option value="unidade">unidade</option><option value="kg">kg</option><option value="caixa">caixa</option><option value="pacote">pacote</option></select><//>
           </div>
-          <${Field} label="Estoque mínimo"><input class=${INPUT} inputMode="numeric" value=${form.minimo} onChange=${e => set('minimo', e.target.value)} placeholder="20" /><//>
+          <${Field} label="Estoque mínimo"><input class=${INPUT} inputMode=${isKg(form.unidade) ? 'decimal' : 'numeric'} value=${form.minimo} onChange=${e => set('minimo', e.target.value)} placeholder="20" /><//>
           <${ErrorNote} msg=${err} />
           <div class="flex gap-2">
             <button class=${BTN_PRIMARY + ' flex-1'} onClick=${submit}>${editId ? 'Salvar alterações' : 'Cadastrar produto'}</button>
@@ -760,7 +974,7 @@ function Products({ db, setDb, notify, askConfirm }) {
       <//>
       <${Card} title=${'Produtos cadastrados (' + db.products.length + ')'} className="lg:col-span-2">
         ${db.products.length ? html`<div class="overflow-x-auto"><table class="w-full text-sm">
-          <thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Produto</th><th class=${TH + ' text-right'}>Custo</th><th class=${TH + ' text-right'}>Venda</th><th class=${TH + ' text-right'}>Lucro</th><th class=${TH + ' text-right'}>Margem</th><th class=${TH + ' text-right'}>Saldo</th><th class=${TH}>Situação</th><th class=${TH}></th></tr></thead>
+          <thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Produto</th><th class=${TH + ' text-right'}>Custo</th><th class=${TH + ' text-right'}>Venda</th><th class=${TH + ' text-right'}>Lucro</th><th class=${TH + ' text-right'}>Margem</th><th class=${TH + ' text-right'}>Saldo</th><th class=${TH}>Situação</th><th class=${TH}><span class="sr-only">Ações</span></th></tr></thead>
           <tbody class="divide-y divide-line">${db.products.map(p => {
             const lucro = (p.precoCent || 0) - (p.custoCent || 0);
             const margem = p.precoCent ? lucro / p.precoCent * 100 : 0;
@@ -770,13 +984,13 @@ function Products({ db, setDb, notify, askConfirm }) {
               <td class=${TD + ' tnum text-right'}>${money(p.precoCent)}</td>
               <td class=${TD + ' tnum text-right font-semibold'}>${money(lucro)}</td>
               <td class=${TD + ' tnum text-right'}>${margem.toFixed(2).replace('.', ',')}%</td>
-              <td class=${TD + ' tnum text-right font-semibold'}>${p.estoque} ${p.unidade || 'un.'}</td>
+              <td class=${TD + ' tnum text-right font-semibold'}>${fmtQty(p.estoque)} ${p.unidade || 'un.'}</td>
               <td class=${TD}>${p.estoque === 0 ? html`<${Badge} tone="bad">Sem estoque<//>` : p.estoque <= p.minimo ? html`<${Badge} tone="warn">Estoque baixo<//>` : html`<${Badge} tone="ok">Em estoque<//>`}</td>
               <td class=${TD + ' whitespace-nowrap text-right'}>
-                <button class=${ICON_BTN} title="Entrada" onClick=${() => openEntry(p)}><${Icon} name="plus" size=${16} /></button>
-                <button class=${ICON_BTN} title="Ajustar estoque" onClick=${() => adjustStock(p)}><${Icon} name="pencil" size=${16} /></button>
-                <button class=${ICON_BTN} title="Editar" onClick=${() => startEdit(p)}><${Icon} name="pencil" size=${16} /></button>
-                <button class=${ICON_BTN} title="Excluir" onClick=${() => remove(p)}><${Icon} name="trash" size=${16} /></button>
+                <button class=${ICON_BTN} title="Entrada de estoque" aria-label=${'Entrada de estoque de ' + p.nome} onClick=${() => openEntry(p)}><${Icon} name="plus" size=${16} /></button>
+                <button class=${ICON_BTN} title="Ajustar estoque" aria-label=${'Ajustar estoque de ' + p.nome} onClick=${() => openAdjust(p)}><${Icon} name="sliders" size=${16} /></button>
+                <button class=${ICON_BTN} title="Editar" aria-label=${'Editar ' + p.nome} onClick=${() => startEdit(p)}><${Icon} name="pencil" size=${16} /></button>
+                <button class=${ICON_BTN} title="Excluir" aria-label=${'Excluir ' + p.nome} onClick=${() => remove(p)}><${Icon} name="trash" size=${16} /></button>
               </td>
             </tr>`;
           })}</tbody></table></div>` : html`<${Empty} icon="package" title="Nenhum produto cadastrado">Use o formulário para cadastrar o primeiro produto.<//>`}
@@ -784,25 +998,38 @@ function Products({ db, setDb, notify, askConfirm }) {
     </div>
 
     ${showEntry ? html`<${Modal} title="Entrada de estoque" onClose=${() => setShowEntry(false)}>
-      <div class="mt-4 space-y-4">
-        <${Field} label="Produto"><select class=${INPUT} value=${entry.produtoId} onChange=${e => setEntry(x => ({...x, produtoId:e.target.value}))}><option value="">Selecione</option>${db.products.map(p => html`<option key=${p.id} value=${p.id}>${p.nome} — saldo ${p.estoque} ${p.unidade || 'un.'}</option>`)}</select><//>
-        <${Field} label="Quantidade de entrada"><input class=${INPUT} inputMode="numeric" value=${entry.qtd} onChange=${e => setEntry(x => ({...x, qtd:e.target.value}))} placeholder="Ex.: 500" /><//>
-        <${Field} label="Observação"><input class=${INPUT} value=${entry.observacao} onChange=${e => setEntry(x => ({...x, observacao:e.target.value}))} placeholder="Ex.: Compra de carvão a granel" /><//>
+      <div class="mt-4 space-y-4" onKeyDown=${enterSubmit(registerEntry)}>
+        <${Field} label="Produto"><select class=${INPUT} value=${entry.produtoId} onChange=${e => setEntry(x => ({ ...x, produtoId: e.target.value }))}><option value="">Selecione</option>${db.products.map(p => html`<option key=${p.id} value=${p.id}>${p.nome} — saldo ${fmtQty(p.estoque)} ${p.unidade || 'un.'}</option>`)}</select><//>
+        <${Field} label="Quantidade de entrada"><input class=${INPUT} inputMode=${entryProduct && isKg(entryProduct.unidade) ? 'decimal' : 'numeric'} value=${entry.qtd} onChange=${e => setEntry(x => ({ ...x, qtd: e.target.value }))} placeholder="Ex.: 500" /><//>
+        <${Field} label="Observação"><input class=${INPUT} value=${entry.observacao} onChange=${e => setEntry(x => ({ ...x, observacao: e.target.value }))} placeholder="Ex.: Compra de carvão a granel" /><//>
         <button class=${BTN_PRIMARY + ' w-full'} onClick=${registerEntry}>Registrar entrada</button>
+      </div>
+    <//>` : null}
+
+    ${adjust ? html`<${Modal} title=${'Ajustar estoque: ' + adjust.nome} onClose=${() => setAdjust(null)}>
+      <div class="mt-4 space-y-4" onKeyDown=${enterSubmit(saveAdjust)}>
+        <p class="text-sm text-muted">Saldo atual: <strong class="text-ink">${fmtQty(adjust.saldo)} ${adjust.unidade}</strong>. Informe a quantidade correta, contada na prateleira.</p>
+        <${Field} label="Quantidade correta"><input class=${INPUT} inputMode=${isKg(adjust.unidade) ? 'decimal' : 'numeric'} value=${adjust.qtd} onChange=${e => setAdjust(x => ({ ...x, qtd: e.target.value }))} placeholder="0" /><//>
+        <${Field} label="Motivo (opcional)"><input class=${INPUT} value=${adjust.motivo} onChange=${e => setAdjust(x => ({ ...x, motivo: e.target.value }))} placeholder="Ex.: contagem do inventário" /><//>
+        <div class="flex justify-end gap-2">
+          <button class=${BTN_GHOST} onClick=${() => setAdjust(null)}>Voltar</button>
+          <button class=${BTN_PRIMARY} onClick=${saveAdjust}>Salvar ajuste</button>
+        </div>
       </div>
     <//>` : null}
 
     ${showMoves ? html`<${Modal} title="Histórico de Movimentações" onClose=${() => setShowMoves(false)}>
       <div class="mt-4 max-h-[65vh] overflow-auto">
-        ${(db.movements || []).length ? html`<div class="space-y-2">${(db.movements || []).slice(0,100).map(m => {
+        ${(db.movements || []).length ? html`<div class="space-y-2">${(db.movements || []).slice(0, 100).map(m => {
           const p = db.products.find(x => x.id === m.produtoId);
-          return html`<div class="rounded-lg border border-line p-3 text-sm"><div class="flex justify-between gap-2"><strong>${p ? p.nome : 'Produto excluído'}</strong><span class="text-xs text-muted">${fmtDateTime(m.data)}</span></div><div class="mt-1 flex flex-wrap gap-2"><${Badge} tone=${m.tipo.includes('Baixa') || m.tipo === 'Venda' ? 'bad' : 'ok'}>${m.tipo}<//><span>${m.qtd} ${p?.unidade || 'un.'}</span><span class="text-muted">${m.saldoAnterior} → ${m.saldoNovo}</span></div><p class="mt-1 text-xs text-muted">${m.motivo || ''}</p></div>`;
+          return html`<div key=${m.id} class="rounded-lg border border-line p-3 text-sm"><div class="flex justify-between gap-2"><strong>${p ? p.nome : 'Produto excluído'}</strong><span class="text-xs text-muted">${fmtDateTime(m.data)}</span></div><div class="mt-1 flex flex-wrap gap-2"><${Badge} tone=${m.tipo.includes('Baixa') || m.tipo === 'Venda' ? 'bad' : 'ok'}>${m.tipo}<//><span>${fmtQty(m.qtd)} ${(p && p.unidade) || 'un.'}</span><span class="text-muted">${fmtQty(m.saldoAnterior)} → ${fmtQty(m.saldoNovo)}</span></div><p class="mt-1 text-xs text-muted">${m.motivo || ''}</p></div>`;
         })}</div>` : html`<p class="text-sm text-muted">Nenhuma movimentação registrada.</p>`}
       </div>
     <//>` : null}
   </div>`;
 }
 
+/* ---------- Clientes ---------- */
 function Clients({ db, setDb, notify, askConfirm }) {
   const empty = { nome: '', doc: '', ie: '', email: '', tel: '', endereco: '', cep: '', cidade: '' };
   const [form, setForm] = useState(empty);
@@ -853,7 +1080,9 @@ function Clients({ db, setDb, notify, askConfirm }) {
     title: 'Excluir cliente', message: 'Excluir "' + c.nome + '"? Os comprovantes de vendas anteriores continuam com os dados dele.', confirmLabel: 'Excluir',
     onConfirm: () => { setDb(d => ({ ...d, clients: d.clients.filter(x => x.id !== c.id) })); if (editId === c.id) reset(); notify('Cliente excluído.'); }
   });
-  const list = db.clients.filter(c => (c.nome + ' ' + c.doc + ' ' + c.tel + ' ' + (c.email || '') + ' ' + (c.cidade || '')).toLowerCase().includes(q.trim().toLowerCase()));
+  const qt = q.trim().toLowerCase();
+  const qd = onlyDigits(qt);
+  const list = db.clients.filter(c => !qt || (c.nome + ' ' + (c.doc || '') + ' ' + (c.tel || '') + ' ' + (c.email || '') + ' ' + (c.cidade || '')).toLowerCase().includes(qt) || (qd && (onlyDigits(c.doc).includes(qd) || onlyDigits(c.tel).includes(qd))));
 
   return html`<div>
     <${PageHead} title="Clientes" sub="Cadastre quem compra de você. Os dados aparecem no comprovante de venda." />
@@ -909,73 +1138,107 @@ function Clients({ db, setDb, notify, askConfirm }) {
   </div>`;
 }
 
+/* ---------- Contas a receber ---------- */
 function ContasReceber({ db, setDb, notify }) {
-  const hoje = new Date();
-  const list=(db.receivables||[]).slice().sort((a,b)=>new Date(a.vencimento)-new Date(b.vencimento));
-  const status=r=>r.pago?'Pago':(new Date(r.vencimento)<hoje?'Vencido':'Em aberto');
-  const marcarPago=r=>{setDb(d=>({...d,receivables:(d.receivables||[]).map(x=>x.id===r.id?{...x,pago:true,pagoEm:new Date().toISOString()}:x)}));notify('Recebimento marcado como pago.');};
-  const aberto=list.filter(r=>!r.pago).reduce((a,r)=>a+r.valorCent,0);
-  const vencido=list.filter(r=>!r.pago&&new Date(r.vencimento)<hoje).reduce((a,r)=>a+r.valorCent,0);
-  return html`<div><${PageHead} title="Contas a Receber" sub="Boletos e vendas a prazo aparecem aqui automaticamente."><div class="rounded-lg border border-line bg-surface px-3 py-2 text-sm">Em aberto: <strong>${money(aberto)}</strong></div></${PageHead}>
-    <div class="grid gap-4 sm:grid-cols-2"><div class="rounded-xl border border-line bg-surface p-5"><p class="text-sm text-muted">Total em aberto</p><p class="mt-2 text-3xl font-bold text-warn">${money(aberto)}</p></div><div class="rounded-xl border border-line bg-surface p-5"><p class="text-sm text-muted">Vencido</p><p class="mt-2 text-3xl font-bold text-bad">${money(vencido)}</p></div></div>
-    <${Card} title="Títulos" className="mt-4">${list.length?html`<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Venda</th><th class=${TH}>Cliente</th><th class=${TH}>Vencimento</th><th class=${TH+' text-right'}>Valor</th><th class=${TH}>Status</th><th class=${TH}></th></tr></thead><tbody class="divide-y divide-line">${list.map(r=>html`<tr><td class=${TD}>${pad(r.numero)}</td><td class=${TD}>${r.clienteNome}</td><td class=${TD}>${fmtDate(r.vencimento)}</td><td class=${TD+' text-right font-semibold'}>${money(r.valorCent)}</td><td class=${TD}><${Badge} tone=${r.pago?'ok':status(r)==='Vencido'?'bad':'warn'}>${status(r)}<//></td><td class=${TD+' text-right'}>${!r.pago?html`<button class=${BTN_GHOST} onClick=${()=>marcarPago(r)}>Marcar pago</button>`:null}</td></tr>`)}</tbody></table></div>`:html`<${Empty} icon="receipt" title="Nenhum título em contas a receber">Ao registrar uma venda com boleto, ela aparecerá aqui automaticamente.<//>`}</${Card}>
+  const list = (db.receivables || []).filter(r => r.status !== 'Cancelado').sort((a, b) => new Date(a.vencimento) - new Date(b.vencimento));
+  const status = r => r.pago ? 'Pago' : (isOverdue(r) ? 'Vencido' : 'Em aberto');
+  const marcarPago = r => {
+    setDb(d => ({ ...d, receivables: (d.receivables || []).map(x => x.id === r.id ? { ...x, pago: true, pagoEm: new Date().toISOString() } : x) }));
+    notify('Recebimento marcado como pago.');
+  };
+  const aberto = list.filter(r => !r.pago).reduce((a, r) => a + r.valorCent, 0);
+  const vencido = list.filter(r => !r.pago && isOverdue(r)).reduce((a, r) => a + r.valorCent, 0);
+  return html`<div>
+    <${PageHead} title="Contas a Receber" sub="Boletos e vendas a prazo aparecem aqui automaticamente. Vendas canceladas saem da lista.">
+      <div class="rounded-lg border border-line bg-surface px-3 py-2 text-sm">Em aberto: <strong>${money(aberto)}</strong></div>
+    <//>
+    <div class="grid gap-4 sm:grid-cols-2">
+      <div class="rounded-xl border border-line bg-surface p-5"><p class="text-sm text-muted">Total em aberto</p><p class="tnum mt-2 text-3xl font-bold text-warn">${money(aberto)}</p></div>
+      <div class="rounded-xl border border-line bg-surface p-5"><p class="text-sm text-muted">Vencido</p><p class="tnum mt-2 text-3xl font-bold text-bad">${money(vencido)}</p></div>
+    </div>
+    <${Card} title="Títulos" className="mt-4">
+      ${list.length ? html`<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="border-b border-line text-left text-xs text-muted"><tr><th class=${TH}>Venda</th><th class=${TH}>Cliente</th><th class=${TH}>Vencimento</th><th class=${TH + ' text-right'}>Valor</th><th class=${TH}>Status</th><th class=${TH}><span class="sr-only">Ações</span></th></tr></thead><tbody class="divide-y divide-line">${list.map(r => html`<tr key=${r.id}>
+        <td class=${TD + ' tnum'}>${pad(r.numero)}</td>
+        <td class=${TD}>${r.clienteNome}</td>
+        <td class=${TD + ' tnum'}>${fmtDate(r.vencimento)}</td>
+        <td class=${TD + ' tnum text-right font-semibold'}>${money(r.valorCent)}</td>
+        <td class=${TD}><${Badge} tone=${r.pago ? 'ok' : status(r) === 'Vencido' ? 'bad' : 'warn'}>${status(r)}<//></td>
+        <td class=${TD + ' text-right'}>${!r.pago ? html`<button class=${BTN_GHOST} onClick=${() => marcarPago(r)}>Marcar pago</button>` : null}</td>
+      </tr>`)}</tbody></table></div>` : html`<${Empty} icon="receipt" title="Nenhum título em contas a receber">Ao registrar uma venda com boleto, ela aparecerá aqui automaticamente.<//>`}
+    <//>
   </div>`;
 }
 
+/* ---------- Minha empresa e backup ---------- */
 function Company({ db, setDb, notify, askConfirm }) {
   const [form, setForm] = useState(db.company);
   const autoBackupInfo = getAutoBackupInfo();
   const fileInputRef = useRef(null);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  
+
   const save = () => {
     if (!form.razao.trim()) return notify('Informe a razão social.', 'bad');
     setDb(d => ({ ...d, company: { ...form, razao: form.razao.trim() } }));
     notify('Dados da empresa salvos.');
   };
 
-  const handleLogoUpload = (e) => {
+  const handleLogoUpload = e => {
     const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      set('logoUrl', event.target.result);
-      notify('Imagem da logo carregada.');
-    };
-    reader.readAsDataURL(file);
     e.target.value = '';
+    if (!file) return;
+    resizeImage(file, 400, url => {
+      if (!url) return notify('Não foi possível ler a imagem.', 'bad');
+      set('logoUrl', url);
+      notify('Logo carregada. Clique em Salvar para aplicar.');
+    });
   };
 
   const exportBackup = () => {
-    const dataStr = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(db, null, 2));
-    const dlAnchorElem = document.createElement('a');
-    dlAnchorElem.setAttribute("href", dataStr);
-    dlAnchorElem.setAttribute("download", `backup_carvao_${new Date().toISOString().slice(0,10)}.json`);
-    dlAnchorElem.click();
-    setDb(d => ({ ...d, lastBackupAt: new Date().toISOString() })); notify('Backup baixado com sucesso!');
+    const now = new Date().toISOString();
+    try {
+      downloadFile('backup_carvao_' + now.slice(0, 10) + '.json', JSON.stringify({ ...db, lastBackupAt: now }, null, 2), 'application/json');
+    } catch (e) { return notify('Não foi possível baixar o backup.', 'bad'); }
+    setDb(d => ({ ...d, lastBackupAt: now }));
+    notify('Backup baixado com sucesso!');
   };
 
-  const importBackup = (e) => {
+  const importBackup = e => {
     const file = e.target.files[0];
+    e.target.value = '';
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = event => {
       try {
-        const importedData = JSON.parse(event.target.result);
-        if (importedData && importedData.products && importedData.sales) {
-          setDb(importedData);
-          setForm(importedData.company || form);
-          notify('Dados restaurados com sucesso!');
-        } else {
-          notify('Arquivo de backup inválido.', 'bad');
-        }
+        const imported = JSON.parse(event.target.result);
+        if (!imported || !Array.isArray(imported.products) || !Array.isArray(imported.sales)) return notify('Arquivo de backup inválido.', 'bad');
+        const restored = migrateDb(imported);
+        askConfirm({
+          title: 'Restaurar backup',
+          message: 'Os dados atuais (' + db.sales.length + ' vendas, ' + db.products.length + ' produtos, ' + db.clients.length + ' clientes) serão substituídos pelos do arquivo (' + restored.sales.length + ' vendas, ' + restored.products.length + ' produtos, ' + restored.clients.length + ' clientes). Uma cópia dos dados atuais fica guardada como cópia automática.',
+          confirmLabel: 'Restaurar', danger: false,
+          onConfirm: () => { snapshotNow(db); setDb(restored); setForm(restored.company); notify('Dados restaurados com sucesso!'); }
+        });
       } catch (err) {
         notify('Erro ao ler arquivo de backup.', 'bad');
       }
     };
+    reader.onerror = () => notify('Erro ao ler arquivo de backup.', 'bad');
     reader.readAsText(file);
-    e.target.value = '';
+  };
+
+  const restoreSnapshot = () => {
+    if (!autoBackupInfo || !autoBackupInfo.db) return;
+    const b = migrateDb(autoBackupInfo.db);
+    askConfirm({
+      title: 'Restaurar cópia automática',
+      message: 'Volta para os dados de ' + fmtDateTime(autoBackupInfo.savedAt) + ' (' + b.sales.length + ' vendas). Os dados atuais viram a nova cópia automática, então dá para desfazer.',
+      confirmLabel: 'Restaurar', danger: false,
+      onConfirm: () => {
+        const restored = { ...b, company: { ...b.company, logoUrl: b.company.logoUrl || db.company.logoUrl } };
+        snapshotNow(db); setDb(restored); setForm(restored.company); notify('Cópia automática restaurada.');
+      }
+    });
   };
 
   return html`<div>
@@ -987,17 +1250,17 @@ function Company({ db, setDb, notify, askConfirm }) {
           <${Field} label="CNPJ"><input class=${INPUT} inputMode="numeric" value=${form.cnpj} onChange=${e => set('cnpj', maskDoc(e.target.value))} /><//>
           <${Field} label="Telefone"><input class=${INPUT} inputMode="tel" value=${form.telefone} onChange=${e => set('telefone', maskPhone(e.target.value))} /><//>
           <div class="sm:col-span-2"><${Field} label="Endereço"><input class=${INPUT} value=${form.endereco} onChange=${e => set('endereco', e.target.value)} /><//></div>
-          
+
           <div class="sm:col-span-2">
-            <${Field} label="Logo do Comprovante (PNG ou JPG)">
+            <${Field} label="Logo do Comprovante (PNG ou JPG)" hint="A imagem é reduzida automaticamente para ocupar pouco espaço.">
               <div class="mt-1 flex items-center gap-4">
-                ${form.logoUrl ? html`<img src=${form.logoUrl} class="h-16 w-16 object-contain rounded border border-line bg-white" alt="Logo preview" />` : null}
+                ${form.logoUrl ? html`<img src=${form.logoUrl} class="h-16 w-16 object-contain rounded border border-line bg-white" alt="Prévia da logo" />` : null}
                 <div class="flex-1 flex items-center gap-2">
                   <label class=${BTN_GHOST + ' cursor-pointer flex-1 justify-center'}>
                     <${Icon} name="upload" size=${16} /> Escolher imagem
                     <input type="file" accept="image/png, image/jpeg" onChange=${handleLogoUpload} class="hidden" />
                   </label>
-                  ${form.logoUrl ? html`<button type="button" class=${BTN_DANGER} onClick=${() => set('logoUrl', '')}><${Icon} name="trash" size=${16} /></button>` : null}
+                  ${form.logoUrl ? html`<button type="button" class=${BTN_DANGER} title="Remover logo" aria-label="Remover logo" onClick=${() => set('logoUrl', '')}><${Icon} name="trash" size=${16} /></button>` : null}
                 </div>
               </div>
             <//>
@@ -1009,28 +1272,39 @@ function Company({ db, setDb, notify, askConfirm }) {
       <//>
       <${Card} title="Backup e Gestão de Dados" className="self-start">
         <div class="space-y-3 p-4 text-sm">
-          <p class="text-muted">Exporte uma cópia de segurança para não perder suas vendas ou importe seus dados em outro aparelho.</p>
-          
+          <p class="text-muted">Os dados ficam só neste navegador. Baixe uma cópia de segurança de vez em quando e guarde fora do aparelho (Drive, e-mail, pen drive).</p>
+          <p class=${'rounded-lg px-3 py-2 text-xs font-medium ' + (db.lastBackupAt && daysSince(db.lastBackupAt) < 7 ? 'bg-ok-soft text-ok' : 'bg-warn-soft text-warn')}>${db.lastBackupAt ? 'Último backup: ' + fmtDateTime(db.lastBackupAt) : 'Nenhum backup baixado ainda.'}</p>
+
           <button class=${BTN_PRIMARY + ' w-full'} onClick=${exportBackup}>
             <${Icon} name="download" size=${16} /> Exportar Backup (Baixar)
           </button>
-          
+
           <input type="file" ref=${fileInputRef} onChange=${importBackup} accept=".json" class="hidden" />
-          
+
           <button class=${BTN_GHOST + ' w-full'} onClick=${() => fileInputRef.current && fileInputRef.current.click()}>
             <${Icon} name="upload" size=${16} /> Restaurar Backup (Carregar)
           </button>
-          
+
           <hr class="border-line my-2"/>
-          
-          <button class=${BTN_GHOST + ' w-full'} onClick=${() => askConfirm({ title: 'Restaurar dados de exemplo', message: 'Isso substitui produtos, clientes, vendas e dados da empresa pelos exemplos.', confirmLabel: 'Restaurar', danger: false, onConfirm: () => { const s = seedData(); setDb(s); setForm(s.company); notify('Dados de exemplo restaurados.'); } })}>Restaurar dados de exemplo</button>
-          <button class=${BTN_GHOST + ' w-full'} onClick=${() => askConfirm({ title: 'Apagar produtos, clientes e vendas', message: 'Isso remove todos os produtos, clientes, vendas e gastos. Os dados da empresa são mantidos. Não dá para desfazer.', confirmLabel: 'Apagar tudo', onConfirm: () => { setDb(d => ({ products: [], clients: [], sales: [], expenses: [], receivables: [], movements: [], company: d.company, seq: 1, autoBackup: d.autoBackup, lastBackupAt: d.lastBackupAt })); notify('Sistema limpo. Cadastre seus produtos e clientes.'); } })}>Começar do zero</button>
+
+          <label class="flex items-start gap-2 text-ink">
+            <input type="checkbox" class="mt-0.5" checked=${db.autoBackup !== false} onChange=${e => setDb(d => ({ ...d, autoBackup: e.target.checked }))} />
+            <span>Guardar cópia automática neste navegador (a cada 12 horas, sem a logo)</span>
+          </label>
+          ${autoBackupInfo ? html`<div class="flex items-center justify-between gap-2 rounded-lg bg-canvas px-3 py-2 text-xs text-muted"><span>Cópia de ${fmtDateTime(autoBackupInfo.savedAt)}</span><button class=${BTN_GHOST + ' !px-2.5 !py-1 !text-xs'} onClick=${restoreSnapshot}>Restaurar</button></div>` : null}
+          <p class="text-xs text-muted">A cópia automática fica no mesmo navegador: não protege contra limpeza de dados nem troca de aparelho.</p>
+
+          <hr class="border-line my-2"/>
+
+          <button class=${BTN_GHOST + ' w-full'} onClick=${() => askConfirm({ title: 'Restaurar dados de exemplo', message: 'Isso substitui produtos, clientes, vendas e dados da empresa pelos exemplos.', confirmLabel: 'Restaurar', danger: false, onConfirm: () => { snapshotNow(db); const s = seedData(); setDb(s); setForm(s.company); notify('Dados de exemplo restaurados.'); } })}>Restaurar dados de exemplo</button>
+          <button class=${BTN_GHOST + ' w-full'} onClick=${() => askConfirm({ title: 'Apagar produtos, clientes e vendas', message: 'Isso remove todos os produtos, clientes, vendas e gastos. Os dados da empresa são mantidos. Uma cópia fica guardada como cópia automática.', confirmLabel: 'Apagar tudo', onConfirm: () => { snapshotNow(db); setDb(d => ({ products: [], clients: [], sales: [], expenses: [], receivables: [], movements: [], company: d.company, seq: 1, autoBackup: d.autoBackup, lastBackupAt: d.lastBackupAt })); notify('Sistema limpo. Cadastre seus produtos e clientes.'); } })}>Começar do zero</button>
         </div>
       <//>
     </div>
   </div>`;
 }
 
+/* ---------- App ---------- */
 const NAV = [
   { key: 'painel', label: 'Painel', icon: 'dashboard' },
   { key: 'fechamento', label: 'Fechamento Mensal', icon: 'calculator' },
@@ -1047,8 +1321,9 @@ function App() {
   const [receiptId, setReceiptId] = useState(null);
   const [confirm, setConfirm] = useState(null);
   const [toast, setToast] = useState(null);
+  const [saveFail, setSaveFail] = useState(false);
 
-  useEffect(() => { saveDb(db); }, [db]);
+  useEffect(() => { setSaveFail(!saveDb(db)); }, [db]);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 3200); return () => clearTimeout(t); }, [toast]);
   useEffect(() => { window.scrollTo(0, 0); }, [tab]);
 
@@ -1056,25 +1331,66 @@ function App() {
   const askConfirm = cfg => setConfirm(cfg);
 
   const finalizeSale = ({ clienteId, itens, pagamento, descontoCent, prazoDias }) => {
-    const c=db.clients.find(x=>x.id===clienteId); if(!c)return;
-    const subtotalCent=itens.reduce((a,i)=>a+i.qtd*i.precoCent,0), totalCent=Math.max(0,subtotalCent-(descontoCent||0));
-    const sale={id:uid(),numero:db.seq,data:new Date().toISOString(),cliente:{id:c.id,nome:c.nome,doc:c.doc,ie:c.ie,email:c.email,tel:c.tel,endereco:c.endereco,cep:c.cep,cidade:c.cidade},itens,subtotalCent,descontoCent:descontoCent||0,totalCent,pagamento};
-    const movements=itens.map(i=>{const p=db.products.find(x=>x.id===i.produtoId);return {id:uid(),produtoId:i.produtoId,tipo:'Venda',qtd:i.qtd,saldoAnterior:p.estoque,saldoNovo:p.estoque-i.qtd,motivo:'Venda nº '+pad(sale.numero),data:sale.data};});
-    let receivable=null;
-    if(pagamento==='Boleto'){const due=new Date();due.setDate(due.getDate()+Number(prazoDias||30));receivable={id:uid(),saleId:sale.id,numero:sale.numero,clienteNome:c.nome,valorCent:totalCent,vencimento:due.toISOString(),pago:false};}
-    setDb(prev=>({ ...prev,seq:prev.seq+1,sales:[sale,...prev.sales],receivables:receivable?[receivable,...(prev.receivables||[])]: (prev.receivables||[]),movements:[...movements,...(prev.movements||[])],products:prev.products.map(p=>{const it=itens.find(i=>i.produtoId===p.id);return it?{...p,estoque:p.estoque-it.qtd}:p;})}));
-    setReceiptId(sale.id); notify('Venda '+pad(sale.numero)+' registrada e estoque atualizado.');
-  };
-  const cancelSale=sale=>askConfirm({title:'Cancelar venda '+pad(sale.numero),message:'A venda de '+money(sale.totalCent)+' será cancelada. O registro permanecerá no histórico e o estoque será devolvido.',confirmLabel:'Cancelar venda',onConfirm:()=>{
-    const now=new Date().toISOString();
-    setDb(prev=>({ ...prev,
-      sales:prev.sales.map(x=>x.id===sale.id?{...x,status:'Cancelada',canceladaEm:now}:x),
-      receivables:(prev.receivables||[]).map(r=>r.saleId===sale.id?{...r,status:'Cancelado'}:r),
-      products:prev.products.map(p=>{const it=sale.itens.find(i=>i.produtoId===p.id);return it?{...p,estoque:p.estoque+it.qtd}:p;}),
-      movements:[...(sale.itens||[]).map(i=>{const p=prev.products.find(x=>x.id===i.produtoId);return {id:uid(),produtoId:i.produtoId,tipo:'Estorno de venda',qtd:i.qtd,saldoAnterior:p.estoque,saldoNovo:p.estoque+i.qtd,motivo:'Cancelamento venda nº '+pad(sale.numero),data:now};}),...(prev.movements||[])]
+    const c = db.clients.find(x => x.id === clienteId);
+    if (!c) return;
+    const subtotalCent = itens.reduce((a, i) => a + lineCent(i), 0);
+    const totalCent = Math.max(0, subtotalCent - (descontoCent || 0));
+    let vencimento = null;
+    if (pagamento === 'Boleto') {
+      const due = new Date();
+      due.setHours(12, 0, 0, 0);
+      due.setDate(due.getDate() + Number(prazoDias || 30));
+      vencimento = due.toISOString();
+    }
+    const sale = {
+      id: uid(), numero: db.seq, data: new Date().toISOString(),
+      cliente: { id: c.id, nome: c.nome, doc: c.doc, ie: c.ie, email: c.email, tel: c.tel, endereco: c.endereco, cep: c.cep, cidade: c.cidade },
+      itens, subtotalCent, descontoCent: descontoCent || 0, totalCent, pagamento, vencimento
+    };
+    const movements = itens.map(i => {
+      const p = db.products.find(x => x.id === i.produtoId);
+      if (!p) return null;
+      return { id: uid(), produtoId: i.produtoId, tipo: 'Venda', qtd: i.qtd, saldoAnterior: p.estoque, saldoNovo: round3(p.estoque - i.qtd), motivo: 'Venda nº ' + pad(sale.numero), data: sale.data };
+    }).filter(Boolean);
+    const receivable = vencimento ? { id: uid(), saleId: sale.id, numero: sale.numero, clienteNome: c.nome, valorCent: totalCent, vencimento, pago: false } : null;
+    setDb(prev => ({
+      ...prev,
+      seq: prev.seq + 1,
+      sales: [sale, ...prev.sales],
+      receivables: receivable ? [receivable, ...(prev.receivables || [])] : (prev.receivables || []),
+      movements: [...movements, ...(prev.movements || [])],
+      products: prev.products.map(p => { const it = itens.find(i => i.produtoId === p.id); return it ? { ...p, estoque: round3(p.estoque - it.qtd) } : p; })
     }));
-    if(receiptId===sale.id)setReceiptId(null);notify('Venda cancelada e estoque devolvido.');
-  }});
+    setReceiptId(sale.id);
+    notify('Venda ' + pad(sale.numero) + ' registrada e estoque atualizado.');
+  };
+
+  const cancelSale = sale => askConfirm({
+    title: 'Cancelar venda ' + pad(sale.numero),
+    message: 'A venda de ' + money(sale.totalCent) + ' será cancelada. O registro permanece no histórico, o estoque é devolvido e o boleto (se houver) sai de Contas a Receber.',
+    confirmLabel: 'Cancelar venda',
+    onConfirm: () => {
+      const now = new Date().toISOString();
+      setDb(prev => {
+        const cur = prev.sales.find(x => x.id === sale.id);
+        if (!cur || cur.status === 'Cancelada') return prev;
+        const movs = (sale.itens || []).map(i => {
+          const p = prev.products.find(x => x.id === i.produtoId);
+          if (!p) return null; // produto excluído: não há saldo para devolver
+          return { id: uid(), produtoId: i.produtoId, tipo: 'Estorno de venda', qtd: i.qtd, saldoAnterior: p.estoque, saldoNovo: round3(p.estoque + i.qtd), motivo: 'Cancelamento venda nº ' + pad(sale.numero), data: now };
+        }).filter(Boolean);
+        return {
+          ...prev,
+          sales: prev.sales.map(x => x.id === sale.id ? { ...x, status: 'Cancelada', canceladaEm: now } : x),
+          receivables: (prev.receivables || []).map(r => r.saleId === sale.id ? { ...r, status: 'Cancelado' } : r),
+          products: prev.products.map(p => { const it = sale.itens.find(i => i.produtoId === p.id); return it ? { ...p, estoque: round3(p.estoque + it.qtd) } : p; }),
+          movements: [...movs, ...(prev.movements || [])]
+        };
+      });
+      notify('Venda cancelada e estoque devolvido.');
+    }
+  });
+
   const receiptSale = receiptId ? db.sales.find(s => s.id === receiptId) : null;
   const navBtn = (n, mobile) => html`<button key=${n.key} onClick=${() => setTab(n.key)} aria-current=${tab === n.key ? 'page' : undefined}
     class=${'flex items-center gap-3 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ember ' + (mobile ? 'shrink-0 ' : 'w-full ') + (tab === n.key ? 'bg-side-active text-white' : 'text-side-ink hover:bg-side-active hover:text-white')}>
@@ -1090,7 +1406,7 @@ function App() {
       <aside class="hidden bg-side p-4 lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-64 lg:shrink-0 lg:flex-col">
         <div class="px-1 py-2">${brand}</div>
         <nav class="mt-6 space-y-1" aria-label="Principal">${NAV.map(n => navBtn(n, false))}</nav>
-        <p class="mt-auto px-2 text-xs leading-relaxed text-side-ink">Os dados ficam salvos neste navegador.</p>
+        <p class="mt-auto px-2 text-xs leading-relaxed text-side-ink">Os dados ficam salvos neste navegador. Faça backup em Minha empresa.</p>
       </aside>
       <div class="min-w-0 flex-1">
         <header class="bg-side px-4 pb-3 pt-4 lg:hidden">
@@ -1098,9 +1414,13 @@ function App() {
           <nav class="-mx-1 mt-3 flex gap-1 overflow-x-auto px-1 pb-1" aria-label="Principal">${NAV.map(n => navBtn(n, true))}</nav>
         </header>
         <main class="mx-auto max-w-6xl p-4 sm:p-6 lg:p-8">
+          ${saveFail ? html`<div role="alert" class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-bad-soft px-4 py-3 text-sm font-medium text-bad">
+            <span>Não foi possível salvar neste navegador (espaço cheio ou armazenamento bloqueado). As alterações novas podem ser perdidas ao fechar. Baixe um backup agora.</span>
+            <button class=${BTN_DANGER} onClick=${() => setTab('empresa')}>Ir para backup</button>
+          </div>` : null}
           ${tab === 'painel' ? html`<${Dashboard} db=${db} gotoTab=${setTab} openReceipt=${setReceiptId} askCancel=${cancelSale} />` : null}
           ${tab === 'fechamento' ? html`<${FechamentoMensal} db=${db} setDb=${setDb} notify=${notify} askConfirm=${askConfirm} />` : null}
-           ${tab === 'receber' ? html`<${ContasReceber} db=${db} setDb=${setDb} notify=${notify} />` : null}
+          ${tab === 'receber' ? html`<${ContasReceber} db=${db} setDb=${setDb} notify=${notify} />` : null}
           ${tab === 'venda' ? html`<${NewSale} db=${db} onFinalize=${finalizeSale} gotoTab=${setTab} />` : null}
           ${tab === 'produtos' ? html`<${Products} db=${db} setDb=${setDb} notify=${notify} askConfirm=${askConfirm} />` : null}
           ${tab === 'clientes' ? html`<${Clients} db=${db} setDb=${setDb} notify=${notify} askConfirm=${askConfirm} />` : null}
