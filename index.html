@@ -380,7 +380,9 @@ const ICONS = {
   copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',
-  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>'
+  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>'
 };
 function Icon({ name, size = 18, className = '' }) {
   return html`<svg xmlns="http://www.w3.org/2000/svg" width=${size} height=${size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" class=${className} aria-hidden="true" dangerouslySetInnerHTML=${{ __html: ICONS[name] }}></svg>`;
@@ -1325,7 +1327,265 @@ function Company({ db, setDb, notify, askConfirm }) {
         </div>
       <//>
     </div>
+    <div class="mt-4 grid gap-4 lg:grid-cols-3"><${AccessCard} notify=${notify} /></div>
   </div>`;
+}
+
+/* ---------- Login ---------- */
+const AUTH_KEY = KEY + '-auth';
+const SESSION_KEY = KEY + '-session';
+const KEEP_KEY = KEY + '-keep';
+const normUser = s => String(s || '').trim().toLowerCase();
+const normCode = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+function getAuth() { try { return JSON.parse(localStorage.getItem(AUTH_KEY) || 'null'); } catch (e) { return null; } }
+function setAuth(a) { try { localStorage.setItem(AUTH_KEY, JSON.stringify(a)); return true; } catch (e) { return false; } }
+function sessionActive() {
+  try { return sessionStorage.getItem(SESSION_KEY) === '1' || localStorage.getItem(KEEP_KEY) === '1'; } catch (e) { return false; }
+}
+function startSession(keep) {
+  try { sessionStorage.setItem(SESSION_KEY, '1'); } catch (e) {}
+  try { if (keep) localStorage.setItem(KEEP_KEY, '1'); else localStorage.removeItem(KEEP_KEY); } catch (e) {}
+}
+function endSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+  try { localStorage.removeItem(KEEP_KEY); } catch (e) {}
+}
+
+const toHex = bytes => Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+function randBytes(n) {
+  const a = new Uint8Array(n);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(a);
+  else for (let i = 0; i < n; i++) a[i] = Math.floor(Math.random() * 256);
+  return a;
+}
+// Senha nunca é guardada: só um hash (PBKDF2 quando o navegador permite)
+async function hashSecret(secret, salt) {
+  if (window.crypto && window.crypto.subtle && window.crypto.subtle.deriveBits) {
+    const enc = new TextEncoder();
+    const key = await window.crypto.subtle.importKey('raw', enc.encode(secret), 'PBKDF2', false, ['deriveBits']);
+    const bits = await window.crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode(salt), iterations: 100000, hash: 'SHA-256' }, key, 256);
+    return 'p1:' + toHex(new Uint8Array(bits));
+  }
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  const str = salt + '|' + secret;
+  for (let i = 0; i < str.length; i++) { const ch = str.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 'w1:' + (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+function genRecoveryCode() {
+  const al = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const a = randBytes(12);
+  let out = '';
+  for (let i = 0; i < 12; i++) out += al[a[i] % al.length];
+  return out.match(/.{4}/g).join('-');
+}
+async function createAuth(user, pass) {
+  const salt = toHex(randBytes(16));
+  const recSalt = toHex(randBytes(16));
+  const code = genRecoveryCode();
+  return { auth: { user, salt, hash: await hashSecret(pass, salt), recSalt, recHash: await hashSecret(normCode(code), recSalt) }, code };
+}
+
+function AuthShell({ title, sub, children }) {
+  return html`<div class="flex min-h-screen items-center justify-center p-4">
+    <div class="pop w-full max-w-sm">
+      <div class="mb-6 flex items-center gap-3">
+        <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-ember text-white"><${Icon} name="flame" size=${22} /></span>
+        <div><p class="font-display text-lg font-bold leading-tight text-ink">Estoque e Vendas</p><p class="text-xs text-muted">Acesso protegido por senha</p></div>
+      </div>
+      <section class="rounded-xl border border-line bg-surface p-5 shadow-sm">
+        <h1 class="font-display text-xl font-bold text-ink">${title}</h1>
+        ${sub ? html`<p class="mt-1 text-sm text-muted">${sub}</p>` : null}
+        <div class="mt-5 space-y-4">${children}</div>
+      </section>
+    </div>
+  </div>`;
+}
+function ShowToggle({ show, setShow }) {
+  return html`<label class="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked=${show} onChange=${e => setShow(e.target.checked)} />Mostrar senha</label>`;
+}
+
+function LoginScreen({ auth, onSuccess, onForgot }) {
+  const [user, setUser] = useState('');
+  const [pass, setPass] = useState('');
+  const [show, setShow] = useState(false);
+  const [keep, setKeep] = useState(false);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [fails, setFails] = useState(0);
+  const [lockUntil, setLockUntil] = useState(0);
+
+  const submit = async () => {
+    if (busy) return;
+    const wait = Math.ceil((lockUntil - Date.now()) / 1000);
+    if (wait > 0) return setErr('Muitas tentativas. Aguarde ' + wait + ' segundos.');
+    setBusy(true); setErr('');
+    const ok = normUser(user) === normUser(auth.user) && (await hashSecret(pass, auth.salt)) === auth.hash;
+    if (ok) return onSuccess(keep);
+    setBusy(false);
+    const n = fails + 1;
+    if (n >= 5) { setFails(0); setLockUntil(Date.now() + 30000); setErr('Muitas tentativas. Aguarde 30 segundos.'); }
+    else { setFails(n); setErr('Usuário ou senha incorretos.'); }
+  };
+
+  return html`<${AuthShell} title="Entrar" sub="Informe seu usuário e senha para abrir o sistema.">
+    <div class="space-y-4" onKeyDown=${enterSubmit(submit)}>
+      <${Field} label="Usuário"><input class=${INPUT} autoComplete="username" autoFocus value=${user} onChange=${e => setUser(e.target.value)} /><//>
+      <${Field} label="Senha"><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="current-password" value=${pass} onChange=${e => setPass(e.target.value)} /><//>
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <${ShowToggle} show=${show} setShow=${setShow} />
+        <label class="flex items-center gap-2 text-sm text-muted"><input type="checkbox" checked=${keep} onChange=${e => setKeep(e.target.checked)} />Manter conectado</label>
+      </div>
+      <${ErrorNote} msg=${err} />
+      <button class=${BTN_PRIMARY + ' w-full py-2.5'} disabled=${busy} onClick=${submit}><${Icon} name="lock" size=${16} />${busy ? 'Verificando...' : 'Entrar'}</button>
+      <button type="button" class="w-full text-center text-sm text-muted underline hover:text-ink" onClick=${onForgot}>Esqueci a senha</button>
+    </div>
+  <//>`;
+}
+
+function SetupScreen({ onDone }) {
+  const [user, setUser] = useState('');
+  const [p1, setP1] = useState('');
+  const [p2, setP2] = useState('');
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    setErr('');
+    if (user.trim().length < 2) return setErr('Informe um usuário com pelo menos 2 caracteres.');
+    if (p1.length < 4) return setErr('A senha precisa ter pelo menos 4 caracteres.');
+    if (p1 !== p2) return setErr('As senhas não conferem.');
+    setBusy(true);
+    const res = await createAuth(user.trim(), p1);
+    if (!setAuth(res.auth)) { setBusy(false); return setErr('Não foi possível salvar o acesso neste navegador (armazenamento bloqueado).'); }
+    onDone(res.code);
+  };
+
+  return html`<${AuthShell} title="Criar acesso" sub="Primeiro acesso: escolha um usuário e uma senha para proteger o sistema.">
+    <div class="space-y-4" onKeyDown=${enterSubmit(submit)}>
+      <${Field} label="Usuário"><input class=${INPUT} autoComplete="username" autoFocus value=${user} onChange=${e => setUser(e.target.value)} /><//>
+      <${Field} label="Senha" hint="Mínimo de 4 caracteres."><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="new-password" value=${p1} onChange=${e => setP1(e.target.value)} /><//>
+      <${Field} label="Repetir senha"><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="new-password" value=${p2} onChange=${e => setP2(e.target.value)} /><//>
+      <${ShowToggle} show=${show} setShow=${setShow} />
+      <${ErrorNote} msg=${err} />
+      <button class=${BTN_PRIMARY + ' w-full py-2.5'} disabled=${busy} onClick=${submit}>${busy ? 'Criando...' : 'Criar acesso'}</button>
+    </div>
+  <//>`;
+}
+
+function CodeScreen({ code, onContinue }) {
+  const [ack, setAck] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copy = async () => { setCopied(await copyText(code)); };
+  return html`<${AuthShell} title="Guarde seu código de recuperação" sub="Se esquecer a senha, este código é a única forma de criar uma nova. Ele não aparece de novo.">
+    <div class="rounded-lg border border-line bg-canvas px-3 py-4 text-center">
+      <p class="tnum font-display text-2xl font-bold tracking-wider text-ink select-all">${code}</p>
+    </div>
+    <button class=${BTN_GHOST + ' w-full'} onClick=${copy}><${Icon} name="copy" size=${16} />${copied ? 'Código copiado' : 'Copiar código'}</button>
+    <label class="flex items-start gap-2 text-sm text-ink"><input type="checkbox" class="mt-0.5" checked=${ack} onChange=${e => setAck(e.target.checked)} /><span>Anotei o código em um lugar seguro.</span></label>
+    <button class=${BTN_PRIMARY + ' w-full py-2.5'} disabled=${!ack} onClick=${onContinue}>Entrar no sistema</button>
+  <//>`;
+}
+
+function RecoverScreen({ onDone, onBack }) {
+  const [code, setCode] = useState('');
+  const [p1, setP1] = useState('');
+  const [p2, setP2] = useState('');
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    setErr('');
+    const a = getAuth();
+    if (!a) return setErr('Acesso não configurado.');
+    if (normCode(code).length !== 12) return setErr('Digite o código de recuperação completo (12 caracteres).');
+    if (p1.length < 4) return setErr('A nova senha precisa ter pelo menos 4 caracteres.');
+    if (p1 !== p2) return setErr('As senhas não conferem.');
+    setBusy(true);
+    const ok = (await hashSecret(normCode(code), a.recSalt)) === a.recHash;
+    if (!ok) { setBusy(false); return setErr('Código de recuperação incorreto.'); }
+    const salt = toHex(randBytes(16));
+    const recSalt = toHex(randBytes(16));
+    const newCode = genRecoveryCode();
+    const next = { ...a, salt, hash: await hashSecret(p1, salt), recSalt, recHash: await hashSecret(normCode(newCode), recSalt) };
+    if (!setAuth(next)) { setBusy(false); return setErr('Não foi possível salvar a nova senha.'); }
+    onDone(newCode);
+  };
+
+  return html`<${AuthShell} title="Redefinir senha" sub="Digite o código de recuperação que você anotou ao criar o acesso.">
+    <div class="space-y-4" onKeyDown=${enterSubmit(submit)}>
+      <${Field} label="Código de recuperação"><input class=${INPUT + ' tnum uppercase'} autoFocus value=${code} onChange=${e => setCode(e.target.value)} placeholder="XXXX-XXXX-XXXX" /><//>
+      <${Field} label="Nova senha"><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="new-password" value=${p1} onChange=${e => setP1(e.target.value)} /><//>
+      <${Field} label="Repetir nova senha"><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="new-password" value=${p2} onChange=${e => setP2(e.target.value)} /><//>
+      <${ShowToggle} show=${show} setShow=${setShow} />
+      <${ErrorNote} msg=${err} />
+      <button class=${BTN_PRIMARY + ' w-full py-2.5'} disabled=${busy} onClick=${submit}>${busy ? 'Verificando...' : 'Redefinir senha'}</button>
+      <button type="button" class="w-full text-center text-sm text-muted underline hover:text-ink" onClick=${onBack}>Voltar para o login</button>
+    </div>
+  <//>`;
+}
+
+function AccessCard({ notify }) {
+  const [user, setUser] = useState((getAuth() || {}).user || '');
+  const [cur, setCur] = useState('');
+  const [np, setNp] = useState('');
+  const [np2, setNp2] = useState('');
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    if (busy) return;
+    setErr('');
+    const a = getAuth();
+    if (!a) return setErr('Acesso não configurado.');
+    if (!cur) return setErr('Informe a senha atual.');
+    if (user.trim().length < 2) return setErr('Informe um usuário com pelo menos 2 caracteres.');
+    if (np && np.length < 4) return setErr('A nova senha precisa ter pelo menos 4 caracteres.');
+    if (np !== np2) return setErr('A confirmação da nova senha não confere.');
+    setBusy(true);
+    const ok = (await hashSecret(cur, a.salt)) === a.hash;
+    if (!ok) { setBusy(false); return setErr('Senha atual incorreta.'); }
+    const next = { ...a, user: user.trim() };
+    if (np) { next.salt = toHex(randBytes(16)); next.hash = await hashSecret(np, next.salt); }
+    setBusy(false);
+    if (!setAuth(next)) return setErr('Não foi possível salvar.');
+    setCur(''); setNp(''); setNp2('');
+    notify('Acesso atualizado.');
+  };
+
+  return html`<${Card} title="Acesso (usuário e senha)" className="self-start">
+    <div class="space-y-4 p-4" onKeyDown=${enterSubmit(save)}>
+      <${Field} label="Usuário"><input class=${INPUT} autoComplete="username" value=${user} onChange=${e => setUser(e.target.value)} /><//>
+      <${Field} label="Senha atual"><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="current-password" value=${cur} onChange=${e => setCur(e.target.value)} /><//>
+      <${Field} label="Nova senha" hint="Deixe em branco para manter a atual."><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="new-password" value=${np} onChange=${e => setNp(e.target.value)} /><//>
+      <${Field} label="Repetir nova senha"><input class=${INPUT} type=${show ? 'text' : 'password'} autoComplete="new-password" value=${np2} onChange=${e => setNp2(e.target.value)} /><//>
+      <${ShowToggle} show=${show} setShow=${setShow} />
+      <${ErrorNote} msg=${err} />
+      <button class=${BTN_PRIMARY + ' w-full'} disabled=${busy} onClick=${save}>${busy ? 'Salvando...' : 'Salvar acesso'}</button>
+    </div>
+  <//>`;
+}
+
+function Root() {
+  const [mode, setMode] = useState(() => !getAuth() ? 'setup' : (sessionActive() ? 'app' : 'login'));
+  const [code, setCode] = useState('');
+  const showCode = c => { setCode(c); setMode('code'); };
+  if (mode === 'setup') return html`<${SetupScreen} onDone=${showCode} />`;
+  if (mode === 'code') return html`<${CodeScreen} code=${code} onContinue=${() => { startSession(false); setMode('app'); }} />`;
+  if (mode === 'recover') return html`<${RecoverScreen} onDone=${showCode} onBack=${() => setMode('login')} />`;
+  if (mode === 'login') {
+    const auth = getAuth();
+    if (!auth) return html`<${SetupScreen} onDone=${showCode} />`;
+    return html`<${LoginScreen} auth=${auth} onSuccess=${keep => { startSession(keep); setMode('app'); }} onForgot=${() => setMode('recover')} />`;
+  }
+  return html`<${App} onLogout=${() => { endSession(); setMode('login'); }} />`;
 }
 
 /* ---------- App ---------- */
@@ -1339,7 +1599,7 @@ const NAV = [
   { key: 'empresa', label: 'Minha empresa', icon: 'building' }
 ];
 
-function App() {
+function App({ onLogout }) {
   const [db, setDb] = useState(loadDb);
   const [tab, setTab] = useState('painel');
   const [receiptId, setReceiptId] = useState(null);
@@ -1430,11 +1690,14 @@ function App() {
       <aside class="hidden bg-side p-4 lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-64 lg:shrink-0 lg:flex-col">
         <div class="px-1 py-2">${brand}</div>
         <nav class="mt-6 space-y-1" aria-label="Principal">${NAV.map(n => navBtn(n, false))}</nav>
-        <p class="mt-auto px-2 text-xs leading-relaxed text-side-ink">Os dados ficam salvos neste navegador. Faça backup em Minha empresa.</p>
+        <div class="mt-auto space-y-3">
+          <button onClick=${onLogout} class="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-side-ink transition hover:bg-side-active hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-ember"><${Icon} name="logout" size=${18} />Sair</button>
+          <p class="px-2 text-xs leading-relaxed text-side-ink">Os dados ficam salvos neste navegador. Faça backup em Minha empresa.</p>
+        </div>
       </aside>
       <div class="min-w-0 flex-1">
         <header class="bg-side px-4 pb-3 pt-4 lg:hidden">
-          ${brand}
+          <div class="flex items-center justify-between gap-3">${brand}<button onClick=${onLogout} class="inline-flex shrink-0 items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm font-medium text-side-ink hover:bg-side-active hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-ember" aria-label="Sair"><${Icon} name="logout" size=${18} />Sair</button></div>
           <nav class="-mx-1 mt-3 flex gap-1 overflow-x-auto px-1 pb-1" aria-label="Principal">${NAV.map(n => navBtn(n, true))}</nav>
         </header>
         <main class="mx-auto max-w-6xl p-4 sm:p-6 lg:p-8">
@@ -1462,7 +1725,7 @@ function App() {
   <//>`;
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${Root} />`);
 </script>
 </body>
 </html>
