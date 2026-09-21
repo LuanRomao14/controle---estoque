@@ -88,13 +88,22 @@
       padding: 6mm 7mm !important; box-shadow: none !important; border: none !important; border-radius: 0 !important;
       border-bottom: 1px dashed #9ca3af !important; break-inside: avoid; page-break-inside: avoid;
     }
-    /* Dados da venda um pouco menores que o cabeçalho */
-    #receipt-print .rc-cliente p { font-size: 13px !important; line-height: 1.35; }
-    #receipt-print .rc-cliente p:first-child { font-size: 11px !important; }
-    #receipt-print .rc-cliente p:nth-child(2) { font-size: 15px !important; }
-    #receipt-print .rc-tabela table { font-size: 13px !important; }
-    #receipt-print .rc-total p { font-size: 13px !important; }
-    #receipt-print .rc-total .text-3xl { font-size: 26px !important; line-height: 1.15; }
+    /* Dados da venda: letras menores e espaçamento compacto */
+    #receipt-print { padding: 5mm 6mm !important; }
+    #receipt-print header { padding-bottom: 3mm !important; }
+    #receipt-print .rc-cliente { margin-top: 3mm !important; }
+    #receipt-print .rc-cliente p { font-size: 12px !important; line-height: 1.25; margin: 0 !important; }
+    #receipt-print .rc-cliente p:first-child { font-size: 10px !important; }
+    #receipt-print .rc-cliente p:nth-child(2) { font-size: 13.5px !important; }
+    #receipt-print .rc-tabela { margin-top: 3mm !important; }
+    #receipt-print .rc-tabela table { font-size: 12px !important; }
+    #receipt-print .rc-tabela th, #receipt-print .rc-tabela td { padding: 3px 8px !important; }
+    #receipt-print .rc-total { margin-top: 2.5mm !important; }
+    #receipt-print .rc-total p { font-size: 12px !important; line-height: 1.25; }
+    #receipt-print .rc-total .text-3xl { font-size: 22px !important; line-height: 1.1; }
+    #receipt-print footer { margin-top: 4mm !important; padding-top: 2mm !important; font-size: 12px !important; }
+    #receipt-print footer p { font-size: 12px !important; }
+    #receipt-print footer p.text-xs { font-size: 10px !important; }
   }
 </style>
 </head>
